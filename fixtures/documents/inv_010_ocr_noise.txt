@@ -1,0 +1,15 @@
+KA1SERSTRA8E HANDEL GMBH
+Kaiserstra8e 19 * 60311 Frankfu rt am Main
+USt-1dNr : DE 8l2 345 678
+
+lNVO1CE
+
+lnvoice Nurnber ;  1NV-2O26-O881
+lnvoice Date    :  2026-O8-O9
+
+Pos1tion                                    Arnount
+Ersatzteile Lieferung 4471                 3 45O,OO
+
+                        Tota1 Arnount :     3 45O,OO EUR
+
+Se1te 1 von 1

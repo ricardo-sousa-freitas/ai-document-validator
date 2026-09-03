@@ -1,0 +1,21 @@
+NORDWIND LOGISTIK GMBH
+Hafenstrasse 12, 20457 Hamburg, Germany
+VAT ID: DE811234567
+
+INVOICE
+
+Invoice Number:   INV-2026-0417
+Invoice Date:     2026-08-28
+Due Date:         2026-09-27
+
+Bill To:
+  Nalanda Global Services S.L.
+  Calle Serrano 41, 28001 Madrid
+
+Description                                Qty        Amount
+Freight forwarding, Hamburg -> Valencia      1       4,000.00
+Customs handling fee                         1         820.50
+
+                                    Total Amount:    4,820.50 EUR
+
+Payment terms: 30 days net. IBAN DE89 3704 0044 0532 0130 00

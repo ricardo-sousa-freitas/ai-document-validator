@@ -1,0 +1,19 @@
+SUMINISTROS INDUSTRIALES LEVANTE, S.L.
+Poligono Industrial Fuente del Jarro
+46988 Paterna (Valencia)
+CIF: B12345678
+
+FACTURA
+
+Numero de factura: F-2026/1188
+Fecha: 14/07/2026
+
+Concepto                                          Importe
+Material electrico segun albaran 4471            1.020,30
+Portes                                              --
+
+Base imponible                                    1.020,30
+IVA 21%                                             214,26
+IMPORTE TOTAL                                     1.234,56 EUR
+
+Forma de pago: transferencia a 60 dias
