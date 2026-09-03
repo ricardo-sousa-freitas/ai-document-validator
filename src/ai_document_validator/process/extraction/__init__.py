@@ -1,1 +1,1 @@
-"""Document extraction pipeline."""
+"""External service clients: extractors, APIs."""

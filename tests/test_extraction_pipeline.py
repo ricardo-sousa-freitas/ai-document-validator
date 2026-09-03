@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from ai_document_validator.clients.extractors import (
+from ai_document_validator.common.constants import VerdictStatusValues
+from ai_document_validator.config.config_types import RuleConfig
+from ai_document_validator.process.extraction.extractors import (
     FixtureExtractor,
     TextExtractor,
 )
-from ai_document_validator.common.constants import VerdictStatusValues
-from ai_document_validator.config.config_types import RuleConfig
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
 

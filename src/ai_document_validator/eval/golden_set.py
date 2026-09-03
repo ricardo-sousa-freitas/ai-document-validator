@@ -4,9 +4,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from ai_document_validator.clients.extractors import FixtureExtractor
 from ai_document_validator.common.logging_config import setup_logger
 from ai_document_validator.config.config_types import RuleConfig
+from ai_document_validator.process.extraction.extractors import FixtureExtractor
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
 logger = setup_logger(__name__)

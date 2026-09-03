@@ -4,13 +4,13 @@ from datetime import date
 
 import pytest
 
-from ai_document_validator.clients.extractors import TextExtractor
 from ai_document_validator.config.config_types import (
     ExtractionResult,
     FieldConfidence,
     InvoiceFieldsExtracted,
     RuleConfig,
 )
+from ai_document_validator.process.extraction.extractors import TextExtractor
 
 
 @pytest.fixture
