@@ -1,0 +1,67 @@
+[project]
+name = "ai-document-validator"
+version = "0.1.0"
+description = "Production-shaped AI document validator for supplier invoices"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.104.0",
+    "pydantic>=2.4.0",
+    "pydantic-settings>=2.0.0",
+    "pypdf>=4.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "uvicorn>=0.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.11.0",
+    "isort>=5.12.0",
+    "flake8>=6.1.0",
+    "mypy>=1.7.0",
+    "pylint>=3.0.0",
+    "vulture>=2.10",
+    "ruff>=0.1.8",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+ai-document-validator = "ai_document_validator.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.8,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 120
+skip_gitignore = true
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-v --cov=src/ai_document_validator --cov-report=html --cov-report=term-missing --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "unit: Fast, isolated unit tests",
+    "integration: Tests involving I/O, external services, or multiple components",
+    "slow: Long-running tests",
+]
