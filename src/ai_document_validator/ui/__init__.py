@@ -1,1 +1,1 @@
-"""UI layer: API endpoints, result formatting."""
+"""Streamlit user interface components."""

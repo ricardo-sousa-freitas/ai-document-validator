@@ -4,20 +4,16 @@ from datetime import date
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import yaml
+
+from ai_document_validator.common.constants import InvoiceFieldNames
 from ai_document_validator.common.logging_config import setup_logger
 from ai_document_validator.config.config_types import RuleConfig
-from ai_document_validator.process.extraction.extractors import FixtureExtractor
+from ai_document_validator.config.validation import RuleConfigModel
+from ai_document_validator.process.extraction.selector import extract_document_file
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
 logger = setup_logger(__name__)
-
-
-class EvaluationCase(NamedTuple):
-    """Single test case with expected labels."""
-
-    case_id: str
-    expected_verdict: str
-    expected_fields: dict[str, Any]
 
 
 class EvaluationMetrics(NamedTuple):
@@ -31,112 +27,140 @@ class EvaluationMetrics(NamedTuple):
     failures: list[dict[str, Any]]
 
 
-class EvaluationState(NamedTuple):
-    """Mutable accumulators used while evaluating golden cases."""
+class DocumentEvaluationCase(NamedTuple):
+    """Golden case backed by a real document and hand-maintained output."""
+
+    case_id: str
+    document: str
+    expected_fields: dict[str, Any] | None
+    expected_verdict: str
+    expected_extraction_status: str | None
+    expected_failed_rules: list[str]
+
+
+class DocumentEvaluationState(NamedTuple):
+    """Accumulators used during document-pair evaluation."""
 
     verdict_matches: int
     failures: list[dict[str, Any]]
-    field_matches_per_field: dict[str, list[bool]]
+    field_matches: dict[str, list[bool]]
 
 
-class GoldenSetEvaluator:
-    """Evaluates extraction and verdict against golden test set."""
+class DocumentGoldenSetEvaluator:
+    """Evaluate extraction and rules against real document/expected-output pairs."""
 
-    def __init__(self, fixture_dir: str | Path) -> None:
-        """Initialize with fixture directory.
-
-        Args:
-            fixture_dir: Path to directory containing fixture YAML files.
-        """
-        self.fixture_dir = Path(fixture_dir)
-        self.extractor = FixtureExtractor(fixture_dir)
+    def __init__(self, expected_file: str | Path, config_file: str | Path | None = None) -> None:
+        """Load document-pair expectations and a separate evaluation config."""
+        self.expected_file = Path(expected_file)
+        self.document_dir = self.expected_file.parent / "documents"
+        self.test_cases: list[DocumentEvaluationCase] = []
+        self.config = self._load_expected_file(config_file)
         self.evaluator = RulesEvaluator()
-        self.test_cases: list[EvaluationCase] = []
-        self._load_golden_set()
 
-    def _load_golden_set(self) -> None:
-        """Load golden test cases from fixtures."""
-        for case_id, fixture in self.extractor.fixtures.items():
-            expected_verdict = fixture.get("expected_verdict", "PASS")
-            expected_fields = fixture.get("fields", {})
-            self.test_cases.append(
-                EvaluationCase(
-                    case_id=case_id,
-                    expected_verdict=expected_verdict,
-                    expected_fields=expected_fields,
-                )
+    def _load_expected_file(self, config_file: str | Path | None) -> RuleConfig:
+        """Load cases and the validated evaluation config."""
+        with self.expected_file.open(encoding="utf-8") as file_handle:
+            data: dict[str, Any] = yaml.safe_load(file_handle) or {}
+
+        self.test_cases = [
+            DocumentEvaluationCase(
+                case_id=case["id"],
+                document=case["document"],
+                expected_fields=case.get("expected_fields"),
+                expected_verdict=case["expected_verdict"],
+                expected_extraction_status=case.get("expected_extraction_status"),
+                expected_failed_rules=case.get("expected_failed_rules", []),
             )
-        logger.info(f"Loaded {len(self.test_cases)} golden test cases")
+            for case in data.get("cases", [])
+        ]
+        selected_config = (
+            Path(config_file)
+            if config_file
+            else Path(__file__).parent.parent / "config" / "rule_validation_config.yaml"
+        )
+        with selected_config.open(encoding="utf-8") as file_handle:
+            config_data: dict[str, Any] = yaml.safe_load(file_handle) or {}
+        config = RuleConfigModel.model_validate(config_data).to_rule_config()
+        logger.info("Loaded canonical evaluation: cases=%d", len(self.test_cases))
+        return config
 
-    def evaluate_all(self, config: RuleConfig | None = None) -> EvaluationMetrics:
-        """Evaluate all test cases."""
-        config = config or self._default_config()
-        evaluation_state = EvaluationState(
+    def evaluate_all(self) -> EvaluationMetrics:
+        """Evaluate all canonical document-pair cases."""
+        logger.info("Starting canonical golden evaluation: cases=%d", len(self.test_cases))
+        field_names = tuple(InvoiceFieldNames.all_fields())
+        state = DocumentEvaluationState(
             verdict_matches=0,
             failures=[],
-            field_matches_per_field={
-                "supplier_name": [],
-                "invoice_number": [],
-                "invoice_date": [],
-                "total_amount": [],
-                "currency": [],
-                "tax_id": [],
-            },
+            field_matches={field_name: [] for field_name in field_names},
         )
 
         for case in self.test_cases:
-            evaluation_state = self._evaluate_case(case, config, evaluation_state)
+            state = self._evaluate_document_case(case, state)
 
         total = len(self.test_cases)
-        passed = evaluation_state.verdict_matches
-        failed = total - passed
-        field_exact_match_rates = {
-            field_name: (sum(matches) / len(matches)) if matches else 0.0
-            for field_name, matches in evaluation_state.field_matches_per_field.items()
-        }
-
-        return EvaluationMetrics(
+        metrics = EvaluationMetrics(
             total_cases=total,
-            passed_cases=passed,
-            failed_cases=failed,
-            verdict_agreement_rate=passed / total if total > 0 else 0.0,
-            field_exact_match_rates=field_exact_match_rates,
-            failures=evaluation_state.failures,
+            passed_cases=state.verdict_matches,
+            failed_cases=total - state.verdict_matches,
+            verdict_agreement_rate=state.verdict_matches / total if total else 0.0,
+            field_exact_match_rates={
+                field: sum(matches) / len(matches) if matches else 0.0 for field, matches in state.field_matches.items()
+            },
+            failures=state.failures,
         )
-
-    @staticmethod
-    def _default_config() -> RuleConfig:
-        """Build the default config used for golden-set evaluation."""
-        return RuleConfig(
-            document_type="SUPPLIER_INVOICE",
-            max_age_days=90,
-            allowed_currencies=["EUR", "GBP"],
-            required_fields=None,
+        logger.info(
+            "Completed canonical golden evaluation: agreement=%.1f%% failures=%d",
+            metrics.verdict_agreement_rate * 100,
+            len(metrics.failures),
         )
+        return metrics
 
-    def _evaluate_case(
+    def _evaluate_document_case(
         self,
-        case: EvaluationCase,
-        config: RuleConfig,
-        evaluation_state: EvaluationState,
-    ) -> EvaluationState:
-        """Evaluate one golden-case and accumulate its results."""
-        extraction = self.extractor.extract("", metadata={"fixture_id": case.case_id})
-        verdict = self.evaluator.evaluate(extraction, config)
+        case: DocumentEvaluationCase,
+        state: DocumentEvaluationState,
+    ) -> DocumentEvaluationState:
+        """Evaluate one document-pair case and update accumulators."""
+        document_path = self.document_dir / case.document
+        if case.expected_extraction_status:
+            try:
+                extract_document_file(document_path)
+            except ValueError:
+                return state._replace(verdict_matches=state.verdict_matches + int(case.expected_verdict == "REVIEW"))
+            state.failures.append({"case_id": case.case_id, "type": "extraction_status_mismatch"})
+            return state
 
+        extraction = extract_document_file(document_path)
+        verdict = self.evaluator.evaluate(extraction, self.config)
         if verdict.status == case.expected_verdict:
-            verdict_matches = evaluation_state.verdict_matches + 1
+            state = state._replace(verdict_matches=state.verdict_matches + 1)
         else:
-            verdict_matches = evaluation_state.verdict_matches
-            evaluation_state.failures.append(self._verdict_failure(case, verdict))
+            state.failures.append(
+                {
+                    "case_id": case.case_id,
+                    "type": "verdict_mismatch",
+                    "expected": case.expected_verdict,
+                    "actual": verdict.status,
+                }
+            )
 
-        for field_name, matches_list in evaluation_state.field_matches_per_field.items():
-            expected_value = self._normalize_expected_value(case.expected_fields.get(field_name))
-            actual_value = getattr(extraction.fields, field_name, None)
-            matches = expected_value == actual_value
-            matches_list.append(matches)
-            if not matches:
-                evaluation_state.failures.append(
+        actual_failed_rules = [result.rule_id for result in verdict.rule_results if not result.passed]
+        if actual_failed_rules != case.expected_failed_rules:
+            state.failures.append(
+                {
+                    "case_id": case.case_id,
+                    "type": "failed_rules_mismatch",
+                    "expected": case.expected_failed_rules,
+                    "actual": actual_failed_rules,
+                }
+            )
+
+        for field_name, matches in state.field_matches.items():
+            expected_value = self._normalize_expected_value((case.expected_fields or {}).get(field_name))
+            actual_value = getattr(extraction.fields, field_name)
+            matches.append(expected_value == actual_value)
+            if expected_value != actual_value:
+                state.failures.append(
                     {
                         "case_id": case.case_id,
                         "type": "field_mismatch",
@@ -145,41 +169,17 @@ class GoldenSetEvaluator:
                         "actual": str(actual_value),
                     }
                 )
-
-        return EvaluationState(
-            verdict_matches=verdict_matches,
-            failures=evaluation_state.failures,
-            field_matches_per_field=evaluation_state.field_matches_per_field,
-        )
+        return state
 
     @staticmethod
     def _normalize_expected_value(expected_value: Any) -> Any:
-        """Normalize comparison values for field matching."""
+        """Normalize ISO date strings before field comparison."""
         if expected_value is None or not isinstance(expected_value, str):
             return expected_value
-
         try:
             return date.fromisoformat(expected_value)
-        except (TypeError, ValueError):
+        except ValueError:
             return expected_value
-
-    @staticmethod
-    def _verdict_failure(case: EvaluationCase, verdict: Any) -> dict[str, Any]:
-        """Build a failure payload for a verdict mismatch."""
-        return {
-            "case_id": case.case_id,
-            "type": "verdict_mismatch",
-            "expected": case.expected_verdict,
-            "actual": verdict.status,
-            "rule_results": [
-                {
-                    "rule_id": rr.rule_id,
-                    "passed": rr.passed,
-                    "message": rr.message,
-                }
-                for rr in verdict.rule_results
-            ],
-        }
 
     @staticmethod
     def print_metrics(metrics: EvaluationMetrics) -> None:

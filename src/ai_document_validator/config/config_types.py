@@ -44,6 +44,8 @@ class RuleConfig(NamedTuple):
     max_age_days: int = 90
     allowed_currencies: list[str] | None = None
     required_fields: list[str] | None = None
+    reference_date: date | None = None
+    review_confidence_threshold: float | None = None
 
 
 class RuleResult(NamedTuple):

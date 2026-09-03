@@ -12,8 +12,11 @@ from ai_document_validator.config.config_types import (
     RuleConfig,
 )
 from ai_document_validator.process.rules.evaluator import (
+    ConfidenceThresholdRule,
     CurrencyRule,
+    InvoiceDatePresentRule,
     InvoiceDateRule,
+    InvoiceDateWithinMaxAgeRule,
     RulesEvaluator,
     SupplierNameRule,
     TotalAmountRule,
@@ -152,6 +155,28 @@ class TestInvoiceDateRule:
 
         assert result.passed is False
         assert "exceeds max age" in result.message.lower()
+
+    def test_uses_configured_reference_date(self) -> None:
+        """Use the pinned reference date instead of the system clock."""
+        result = InvoiceDateWithinMaxAgeRule().evaluate(
+            ExtractionResult(
+                fields=InvoiceFieldsExtracted(None, None, date(2026, 3, 12), None, None, None),
+                confidence=FieldConfidence(0.0, 0.0, 0.9, 0.0, 0.0, 0.0),
+            ),
+            RuleConfig(document_type="SUPPLIER_INVOICE", max_age_days=90, reference_date=date(2026, 9, 3)),
+        )
+
+        assert result.passed is False
+
+    def test_missing_date_is_not_applicable_to_recency(self) -> None:
+        """Treat recency as not applicable when presence already failed."""
+        extraction = ExtractionResult(
+            fields=InvoiceFieldsExtracted(None, None, None, None, None, None),
+            confidence=FieldConfidence(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        )
+
+        assert InvoiceDatePresentRule().evaluate(extraction, RuleConfig("SUPPLIER_INVOICE")).passed is False
+        assert InvoiceDateWithinMaxAgeRule().evaluate(extraction, RuleConfig("SUPPLIER_INVOICE")).passed is True
 
 
 @pytest.mark.unit
@@ -306,6 +331,27 @@ class TestCurrencyRule:
         )
 
         result = rule.evaluate(extraction, config)
+
+        assert result.passed is False
+
+
+@pytest.mark.unit
+class TestConfidenceThresholdRule:
+    """Test confidence-based review handling."""
+
+    def test_fails_when_required_field_is_below_threshold(self) -> None:
+        """Report low confidence as a soft rule failure."""
+        extraction = ExtractionResult(
+            fields=InvoiceFieldsExtracted("Supplier", "INV-1", date.today(), 10.0, "EUR", None),
+            confidence=FieldConfidence(0.4, 0.9, 0.9, 0.9, 0.9, 0.0),
+        )
+        config = RuleConfig(
+            document_type="SUPPLIER_INVOICE",
+            required_fields=["supplier_name"],
+            review_confidence_threshold=0.6,
+        )
+
+        result = ConfidenceThresholdRule().evaluate(extraction, config)
 
         assert result.passed is False
 

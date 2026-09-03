@@ -49,8 +49,6 @@ class VerdictStatusValues:
 # Confidence thresholds
 CONFIDENCE_HIGH = 0.9  # Direct match
 CONFIDENCE_MEDIUM = 0.7  # Regex/heuristic match
-CONFIDENCE_LOW = 0.5  # Partial match
+CONFIDENCE_SECONDARY = 0.6  # Less-specific regex match
+CONFIDENCE_FALLBACK = 0.3  # Weak or ambiguous regex match
 CONFIDENCE_MISSING = 0.0  # Field not found
-
-# Default max age for invoices (days)
-DEFAULT_MAX_INVOICE_AGE_DAYS = 90

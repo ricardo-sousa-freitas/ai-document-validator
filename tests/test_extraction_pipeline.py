@@ -1,16 +1,13 @@
 """Integration tests for extraction and verdict pipeline."""
 
-from datetime import date
 from pathlib import Path
 
 import pytest
 
 from ai_document_validator.common.constants import VerdictStatusValues
 from ai_document_validator.config.config_types import RuleConfig
-from ai_document_validator.process.extraction.extractors import (
-    FixtureExtractor,
-    TextExtractor,
-)
+from ai_document_validator.process.extraction.extractors import PDFExtractor, TextExtractor
+from ai_document_validator.process.extraction.selector import extract_document_file, select_extractor
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
 
@@ -36,6 +33,8 @@ class TestTextExtractionPipeline:
         assert result.fields.invoice_date is not None
         assert result.fields.total_amount == 5000.0
         assert result.fields.tax_id is not None
+        assert result.confidence.invoice_date == 0.9
+        assert result.confidence.total_amount == 0.9
 
     def test_extract_with_missing_fields(self, text_extractor: TextExtractor) -> None:
         """Test extraction when some fields are missing."""
@@ -79,109 +78,82 @@ class TestTextExtractionPipeline:
 
 
 @pytest.mark.integration
-class TestFixtureExtractionPipeline:
-    """Test fixture-based extraction pipeline."""
+class TestMultiFormatExtraction:
+    """Test text and PDF documents through the shared extraction path."""
 
-    def test_load_and_extract_from_fixtures(self) -> None:
-        """Test loading and extracting from fixture files."""
-        fixture_dir = Path(__file__).parent.parent / "fixtures"
-        if not fixture_dir.exists():
-            pytest.skip("Fixtures directory not found")
+    samples_dir = Path(__file__).parent.parent / "fixtures" / "documents"
 
-        extractor = FixtureExtractor(fixture_dir)
+    def test_extract_text_sample_file(self) -> None:
+        """Extract fields from a plain-text sample selected by its extension."""
+        result = extract_document_file(self.samples_dir / "inv_001_clean_eur.txt")
 
-        # Extract from a known fixture
-        result = extractor.extract("", metadata={"fixture_id": "invoice_001"})
+        assert result.fields.supplier_name == "NORDWIND LOGISTIK GMBH"
+        assert result.fields.invoice_number == "INV-2026-0417"
+        assert result.fields.total_amount == 4820.5
+        assert result.fields.currency == "EUR"
 
-        assert result.fields.supplier_name == "Acme Corporation"
-        assert result.fields.invoice_number == "INV-2024-001"
-        assert result.fields.invoice_date == date(2026, 9, 1)  # Updated to 2026
-        assert result.fields.total_amount == 5000.0
+    def test_extract_pdf_sample_from_path_and_bytes(self) -> None:
+        """Extract fields from a PDF sample supplied as a path and as bytes."""
+        pdf_path = self.samples_dir / "inv_001_clean_eur.pdf"
+        path_result = PDFExtractor().extract(str(pdf_path))
+        bytes_result = PDFExtractor().extract(pdf_path.read_bytes())
 
-    def test_evaluate_fixture_against_rules(self) -> None:
-        """Test evaluating fixture extraction against rules."""
-        fixture_dir = Path(__file__).parent.parent / "fixtures"
-        if not fixture_dir.exists():
-            pytest.skip("Fixtures directory not found")
+        assert path_result.fields == bytes_result.fields
+        assert path_result.fields.supplier_name == "NORDWIND LOGISTIK GMBH"
+        assert path_result.fields.invoice_number == "INV-2026-0417"
+        assert path_result.fields.total_amount == 4820.5
+        assert path_result.fields.currency == "EUR"
 
-        extractor = FixtureExtractor(fixture_dir)
-        evaluator = RulesEvaluator()
-        config = RuleConfig(
-            document_type="SUPPLIER_INVOICE",
-            max_age_days=90,
-            allowed_currencies=["EUR", "GBP"],
+    def test_selector_prefers_content_type_over_extension(self) -> None:
+        """Use the explicit MIME type when it conflicts with the filename."""
+        assert isinstance(select_extractor("invoice.txt", "application/pdf"), PDFExtractor)
+        assert isinstance(select_extractor("invoice.pdf", "text/plain"), TextExtractor)
+
+    def test_selector_rejects_unsupported_extension(self) -> None:
+        """Reject formats that the service cannot extract."""
+        with pytest.raises(ValueError, match="Unsupported document extension"):
+            select_extractor("invoice.docx")
+
+    def test_corrupt_pdf_error_preserves_cause(self) -> None:
+        """Wrap corrupt PDF failures without losing the original exception."""
+        with pytest.raises(ValueError, match="Failed to extract PDF") as error:
+            PDFExtractor().extract(b"not a PDF")
+
+        assert error.value.__cause__ is not None
+
+    def test_empty_pdf_error_is_safe(self) -> None:
+        """Reject empty PDF bytes with a safe domain-level error."""
+        with pytest.raises(ValueError, match="Failed to extract PDF"):
+            PDFExtractor().extract(b"")
+
+    def test_missing_fields_remain_explicit(self) -> None:
+        """Allow missing fields to flow to the rules engine as failures."""
+        result = TextExtractor().extract("Supplier: Partial Invoice\nAmount: 100.00\n")
+        verdict = RulesEvaluator().evaluate(
+            result,
+            RuleConfig(document_type="SUPPLIER_INVOICE", max_age_days=90),
         )
 
-        # Test invoice_001 (should PASS)
-        extraction = extractor.extract("", metadata={"fixture_id": "invoice_001"})
-        verdict = evaluator.evaluate(extraction, config)
-
-        assert verdict.status == VerdictStatusValues.PASS
-
-    def test_evaluate_fixture_with_missing_date(self) -> None:
-        """Test evaluating fixture with missing invoice date."""
-        fixture_dir = Path(__file__).parent.parent / "fixtures"
-        if not fixture_dir.exists():
-            pytest.skip("Fixtures directory not found")
-
-        extractor = FixtureExtractor(fixture_dir)
-        evaluator = RulesEvaluator()
-        config = RuleConfig(
-            document_type="SUPPLIER_INVOICE",
-            max_age_days=90,
-            allowed_currencies=["EUR", "GBP"],
-        )
-
-        # Test invoice_004 (missing date, should FAIL)
-        extraction = extractor.extract("", metadata={"fixture_id": "invoice_004_missing_date"})
-        verdict = evaluator.evaluate(extraction, config)
-
+        assert result.fields.invoice_date is None
         assert verdict.status == VerdictStatusValues.FAIL
 
-    def test_evaluate_fixture_with_zero_amount(self) -> None:
-        """Test evaluating fixture with zero amount."""
-        fixture_dir = Path(__file__).parent.parent / "fixtures"
-        if not fixture_dir.exists():
-            pytest.skip("Fixtures directory not found")
-
-        extractor = FixtureExtractor(fixture_dir)
-        evaluator = RulesEvaluator()
-        config = RuleConfig(
-            document_type="SUPPLIER_INVOICE",
-            max_age_days=90,
+    def test_confidence_reflects_regex_ambiguity(self) -> None:
+        """Lower amount confidence when multiple total candidates are present."""
+        result = TextExtractor().extract(
+            "Supplier: Example Corp\n"
+            "Invoice Number: INV-1\n"
+            "Date: 2026-09-01\n"
+            "Subtotal: 100.00 EUR\n"
+            "Net total: 90.00 EUR\n"
+            "Total Amount: 90.00 EUR\n"
         )
 
-        # Test invoice_005 (zero amount, should FAIL)
-        extraction = extractor.extract("", metadata={"fixture_id": "invoice_005_zero_amount"})
-        verdict = evaluator.evaluate(extraction, config)
+        assert result.fields.total_amount == 90.0
+        assert result.confidence.total_amount == 0.3
 
-        assert verdict.status == VerdictStatusValues.FAIL
+    def test_confidence_reflects_specificity_tier(self) -> None:
+        """Use a lower score for a less-specific amount label."""
+        result = TextExtractor().extract("Supplier: Example Corp\nAmount: 100.00\n")
 
-
-@pytest.mark.integration
-class TestEndToEndValidation:
-    """Test complete validation workflow."""
-
-    def test_validate_all_fixtures(self) -> None:
-        """Test validation workflow on all fixtures."""
-        fixture_dir = Path(__file__).parent.parent / "fixtures"
-        if not fixture_dir.exists():
-            pytest.skip("Fixtures directory not found")
-
-        extractor = FixtureExtractor(fixture_dir)
-        evaluator = RulesEvaluator()
-        config = RuleConfig(
-            document_type="SUPPLIER_INVOICE",
-            max_age_days=90,
-            allowed_currencies=["EUR", "GBP"],
-        )
-
-        # Run on all fixtures
-        results = []
-        for fixture_id in extractor.fixtures.keys():
-            extraction = extractor.extract("", metadata={"fixture_id": fixture_id})
-            verdict = evaluator.evaluate(extraction, config)
-            results.append((fixture_id, verdict.status))
-
-        # Verify we got results for multiple fixtures
-        assert len(results) >= 5
+        assert result.fields.total_amount == 100.0
+        assert result.confidence.total_amount == 0.3

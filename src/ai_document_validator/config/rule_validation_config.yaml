@@ -1,0 +1,12 @@
+document_type: SUPPLIER_INVOICE
+max_age_days: 90
+allowed_currencies:
+  - EUR
+  - GBP
+required_fields:
+  - supplier_name
+  - invoice_number
+  - invoice_date
+  - total_amount
+reference_date: "2026-09-03"
+review_confidence_threshold: 0.60

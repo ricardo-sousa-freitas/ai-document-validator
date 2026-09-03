@@ -5,24 +5,39 @@ import re
 from abc import ABC, abstractmethod
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
-import yaml
 from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
-from ai_document_validator.common.constants import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, CONFIDENCE_MISSING
+from ai_document_validator.common.constants import (
+    CONFIDENCE_FALLBACK,
+    CONFIDENCE_HIGH,
+    CONFIDENCE_MISSING,
+    CONFIDENCE_SECONDARY,
+)
+from ai_document_validator.common.logging_config import setup_logger
 from ai_document_validator.config.config_types import (
     ExtractionResult,
     FieldConfidence,
     InvoiceFieldsExtracted,
 )
 
+logger = setup_logger(__name__)
+
+
+class FieldEvidence(NamedTuple):
+    """Evidence metadata for one regex-extracted field."""
+
+    pattern_index: int
+    candidate_count: int
+
 
 class Extractor(ABC):
     """Abstract base class for document extractors."""
 
     @abstractmethod
-    def extract(self, content: str, metadata: dict[str, Any] | None = None) -> ExtractionResult:
+    def extract(self, content: str | bytes, metadata: dict[str, Any] | None = None) -> ExtractionResult:
         """Extract structured fields from document content.
 
         Args:
@@ -43,30 +58,60 @@ class TextExtractor(Extractor):
         # Regex patterns for field detection
         self.patterns = {
             "supplier_name": [
-                r"(?:supplier|vendor|company|from)[\s:]+([^\n]+?)(?:\n|$)",
-                r"^([A-Z][A-Za-z\s&,.]+?)(?:\n|$)",
+                # Explicit labels are the strongest evidence.
+                r"(?im)^\s*(?:supplier|vendor|company|from)\s*:\s*([^\n]+)",
+                # The first non-empty header line is a weaker regex signal.
+                r"(?im)\A(?:[ \t]*\r?\n)*[ \t]*(?!invoice\b|factura\b|credit note\b|commercial invoice\b)"
+                r"([A-Za-z][A-Za-z0-9 &.,'/-]{2,})[ \t]*(?:\r?\n|$)",
+                r"(?im)^\s*invoice[ \t]+from[ \t]+([^\n]+)",
+                r"(?im)^\s*from[ \t]+([^\n]+)",
             ],
             "invoice_number": [
-                r"(?:invoice|inv|reference|ref|no\.?|#)[\s:]+([A-Z0-9-/]+)",
-                r"INV-?(\d+)",
+                # Dedicated invoice-number labels are the strongest evidence.
+                r"(?im)^\s*(?:invoice[ \t]+(?:number|no\.?|#)|"
+                r"numero[ \t]+de[ \t]+factura|reference|ref|no\.?\b|#)"
+                r"[ \t]*[:#]?[ \t]*([A-Z0-9][A-Z0-9_/-]*)",
+                # Embedded number labels are weaker but still explicit.
+                r"(?im)^.*?\binvoice[ \t]+no\.?[ \t]*([A-Z0-9][A-Z0-9_/-]*)\s*$",
+                # Generic invoice and number fallbacks are least specific.
+                r"(?im)^\s*invoice\s+([A-Z0-9][A-Z0-9_/-]*)\s*$",
+                r"(?im)^.*?\b(?:no\.?\b|#)\s*([A-Z0-9][A-Z0-9_/-]*)\s*$",
             ],
             "invoice_date": [
-                r"(?:date|invoice date|inv date|issued)[\s:]+(\d{4}-\d{2}-\d{2})",
-                r"(?:date|invoice date)[\s:]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+                # ISO dates are unambiguous and receive the highest tier.
+                r"(?im)^\s*(?:date|invoice date|inv date|issued|fecha)\s*:\s*(\d{4}-\d{2}-\d{2})",
+                # Labeled localized dates are the next strongest tier.
+                r"(?im)^\s*(?:date|invoice date|inv date|issued|fecha)\s*:\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+                # Long-form dates require more parsing assumptions.
+                r"(?im)^\s*(?:date|invoice date|inv date|issued)\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
             ],
             "total_amount": [
-                r"(?:total|amount|sum|grand total)[\s:]+([0-9]+(?:[.,][0-9]{2})?)",
+                # Specific total labels are preferred over generic amount labels.
+                r"(?im)^.*(?:total\s+amount|total\s+due|importe\s+total)"
+                r"\s*:?\s*(?:[A-Z]{3}\s+)?(-?[0-9][0-9.,\s]*)"
+                r"\s*(?:[A-Z]{3})?\s*$",
+                # A plain total label is less specific.
+                r"(?im)^\s*total\s*:\s*(?:[A-Z]{3}\s+)?(-?[0-9][0-9.,\s]*)\s*(?:[A-Z]{3})?\s*$",
+                # Generic amount/sum labels are fallback evidence.
+                r"(?im)^\s*(?:amount|sum)\s*:\s*(-?[0-9][0-9.,\s]*)\s*(?:[A-Z]{3})?\s*$",
             ],
             "currency": [
-                r"(?:currency|curr|cur|in\s+)([A-Z]{3})",
-                r"([A-Z]{3})[\s]?([0-9]+(?:[.,][0-9]{2})?)",
+                # Explicit currency labels are strongest.
+                r"(?im)^\s*(?:currency|curr|cur|moneda)\s*:\s*([A-Z]{3})\s*$",
+                # Currency on a total line is contextual evidence.
+                r"(?im)^.*(?:total\s+amount|total\s+due|importe\s+total|total)\s*:\s*.*\b(EUR|GBP|USD)\b",
+                # A standalone currency code is the broadest fallback.
+                r"\b(EUR|GBP|USD)\b",
             ],
             "tax_id": [
-                r"(?:tax id|vat|tax number|tax no|tin)[\s:]+([A-Z0-9-/]+)",
+                # Explicit tax labels are the only accepted evidence.
+                r"(?im)^\s*(?:tax id|federal tax id|vat id|vat|tax number|"
+                r"tax no|tin|cif|nif|btw|tva|ust-idnr\.?|vat reg no)"
+                r"\s*:\s*([A-Z0-9][A-Z0-9 /-]*)",
             ],
         }
 
-    def extract(self, content: str, metadata: dict[str, Any] | None = None) -> ExtractionResult:
+    def extract(self, content: str | bytes, metadata: dict[str, Any] | None = None) -> ExtractionResult:
         """Extract fields using heuristic regex patterns.
 
         Args:
@@ -76,9 +121,15 @@ class TextExtractor(Extractor):
         Returns:
             ExtractionResult with extracted fields and confidence scores.
         """
-        fields = self._extract_fields(content)
-        confidence = self._compute_confidence(fields)
+        if isinstance(content, bytes):
+            raise TypeError("TextExtractor requires text content, not PDF bytes")
+
+        logger.info("Starting text extraction: characters=%d", len(content))
+        fields, evidence = self._extract_fields(content)
+        confidence = self._compute_confidence(fields, evidence)
         evidence_snippet = content[:200] if content else None
+        extracted_field_count = sum(value is not None for value in fields)
+        logger.info("Completed text extraction: extracted_fields=%d", extracted_field_count)
 
         return ExtractionResult(
             fields=fields,
@@ -89,26 +140,31 @@ class TextExtractor(Extractor):
             latency_ms=5.0,
         )
 
-    def _extract_fields(self, content: str) -> InvoiceFieldsExtracted:
+    def _extract_fields(self, content: str) -> tuple[InvoiceFieldsExtracted, dict[str, FieldEvidence]]:
         """Extract individual fields using regex patterns."""
-        supplier_name = self._extract_field(content, "supplier_name")
-        invoice_number = self._extract_field(content, "invoice_number")
-        invoice_date_str = self._extract_field(content, "invoice_date")
-        total_amount_str = self._extract_field(content, "total_amount")
-        currency = self._extract_field(content, "currency")
-        tax_id = self._extract_field(content, "tax_id")
+        extracted_values: dict[str, str | None] = {
+            "supplier_name": None,
+            "invoice_number": None,
+            "invoice_date": None,
+            "total_amount": None,
+            "currency": None,
+            "tax_id": None,
+        }
+        evidence: dict[str, FieldEvidence] = {}
+        for field_name in extracted_values:
+            value, field_evidence = self._extract_field_with_evidence(content, field_name)
+            extracted_values[field_name] = value
+            evidence[field_name] = field_evidence
 
-        invoice_date = self._parse_invoice_date(invoice_date_str)
-        total_amount = self._parse_total_amount(total_amount_str)
-
-        return InvoiceFieldsExtracted(
-            supplier_name=supplier_name,
-            invoice_number=invoice_number,
-            invoice_date=invoice_date,
-            total_amount=total_amount,
-            currency=currency,
-            tax_id=tax_id,
+        fields = InvoiceFieldsExtracted(
+            supplier_name=extracted_values["supplier_name"],
+            invoice_number=extracted_values["invoice_number"],
+            invoice_date=self._parse_invoice_date(extracted_values["invoice_date"]),
+            total_amount=self._parse_number(extracted_values["total_amount"]),
+            currency=extracted_values["currency"],
+            tax_id=self._normalize_tax_id(extracted_values["tax_id"]),
         )
+        return fields, evidence
 
     def _parse_invoice_date(self, invoice_date_str: str | None) -> date | None:
         """Parse invoice date strings from common formats."""
@@ -119,7 +175,7 @@ class TextExtractor(Extractor):
             if len(invoice_date_str) == 10 and invoice_date_str[4] == "-":
                 return date.fromisoformat(invoice_date_str)
 
-            for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"):
+            for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%B %d, %Y"):
                 try:
                     return datetime.strptime(invoice_date_str, fmt).date()
                 except ValueError:
@@ -134,13 +190,37 @@ class TextExtractor(Extractor):
         if not total_amount_str:
             return None
 
+        return self._parse_number(total_amount_str)
+
+    @staticmethod
+    def _parse_number(number_string: str | None) -> float | None:
+        """Parse common US and European monetary separators."""
+        if not number_string:
+            return None
+
+        cleaned = number_string.replace(" ", "").strip()
+        if not cleaned:
+            return None
+
         try:
-            cleaned = total_amount_str.replace(",", ".").replace(" ", "")
+            if "," in cleaned and "." in cleaned:
+                cleaned = (
+                    cleaned.replace(".", "") if cleaned.rfind(",") > cleaned.rfind(".") else cleaned.replace(",", "")
+                )
+                cleaned = cleaned.replace(",", ".")
+            elif "," in cleaned:
+                decimal_part = cleaned.rsplit(",", maxsplit=1)[-1]
+                cleaned = cleaned.replace(",", ".") if len(decimal_part) == 2 else cleaned.replace(",", "")
             return float(cleaned)
         except ValueError:
             return None
 
-    def _extract_field(self, content: str, field_name: str) -> str | None:
+    @staticmethod
+    def _normalize_tax_id(tax_id: str | None) -> str | None:
+        """Normalize tax identifiers that contain presentation spaces."""
+        return re.sub(r"\s+", "", tax_id) if tax_id else None
+
+    def _extract_field_with_evidence(self, content: str, field_name: str) -> tuple[str | None, FieldEvidence]:
         """Extract a single field using regex patterns.
 
         Args:
@@ -151,13 +231,33 @@ class TextExtractor(Extractor):
             Extracted field value or None.
         """
         patterns = self.patterns.get(field_name, [])
-        for pattern in patterns:
-            match = re.search(pattern, content, re.IGNORECASE | re.MULTILINE)
-            if match:
-                return match.group(1).strip()
-        return None
+        matches_by_pattern = [list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE)) for pattern in patterns]
+        candidate_values = {match.group(1).strip().casefold() for matches in matches_by_pattern for match in matches}
+        candidate_count = len(candidate_values)
+        if field_name == "total_amount":
+            candidate_count = max(candidate_count, self._count_amount_candidates(content))
+        for pattern_index, matches in enumerate(matches_by_pattern):
+            if matches:
+                return matches[0].group(1).strip(), FieldEvidence(pattern_index, candidate_count)
+        return None, FieldEvidence(-1, 0)
 
-    def _compute_confidence(self, fields: InvoiceFieldsExtracted) -> FieldConfidence:
+    @staticmethod
+    def _count_amount_candidates(content: str) -> int:
+        """Count labeled monetary candidates used to assess amount ambiguity."""
+        candidate_pattern = (
+            r"(?im)^\s*.*(?:subtotal|net\s+total|total\s+amount|total\s+due|importe\s+total|total|amount|sum)"
+            r"\s*:?\s*(?:[A-Z]{3}\s+)?-?[0-9][0-9.,\s]*"
+        )
+        return len(re.findall(candidate_pattern, content))
+
+    def _extract_field(self, content: str, field_name: str) -> str | None:
+        """Extract a field value without exposing its evidence metadata."""
+        value, _ = self._extract_field_with_evidence(content, field_name)
+        return value
+
+    def _compute_confidence(
+        self, fields: InvoiceFieldsExtracted, evidence: dict[str, FieldEvidence]
+    ) -> FieldConfidence:
         """Compute confidence scores for each field.
 
         Confidence scoring:
@@ -170,106 +270,30 @@ class TextExtractor(Extractor):
         Returns:
             FieldConfidence with scores for each field.
         """
+
+        def score(field_name: str, value: Any) -> float:
+            """Score one value from its winning regex tier and ambiguity."""
+            if value is None or value == "":
+                return CONFIDENCE_MISSING
+            field_evidence = evidence[field_name]
+            if field_evidence.pattern_index < 0:
+                return CONFIDENCE_FALLBACK
+            tier_score = [CONFIDENCE_HIGH, CONFIDENCE_SECONDARY, CONFIDENCE_FALLBACK][
+                min(field_evidence.pattern_index, 2)
+            ]
+            if field_evidence.candidate_count >= 3:
+                return min(tier_score, CONFIDENCE_FALLBACK)
+            if field_evidence.candidate_count == 2:
+                return min(tier_score, CONFIDENCE_SECONDARY)
+            return tier_score
+
         return FieldConfidence(
-            supplier_name=CONFIDENCE_HIGH if fields.supplier_name else CONFIDENCE_MISSING,
-            invoice_number=CONFIDENCE_HIGH if fields.invoice_number else CONFIDENCE_MISSING,
-            invoice_date=CONFIDENCE_HIGH if fields.invoice_date else CONFIDENCE_MISSING,
-            total_amount=CONFIDENCE_HIGH if fields.total_amount is not None else CONFIDENCE_MISSING,
-            currency=CONFIDENCE_MEDIUM if fields.currency else CONFIDENCE_MISSING,  # Often harder to detect
-            tax_id=CONFIDENCE_MEDIUM if fields.tax_id else CONFIDENCE_MISSING,  # Optional field
-        )
-
-
-class FixtureExtractor(Extractor):
-    """Loads extraction results from pre-defined fixtures (YAML/JSON)."""
-
-    def __init__(self, fixture_dir: str | Path) -> None:
-        """Initialize with path to fixture directory.
-
-        Args:
-            fixture_dir: Path to directory containing fixture YAML files.
-        """
-        self.fixture_dir = Path(fixture_dir)
-        self.fixtures: dict[str, dict[str, Any]] = {}
-        self._load_fixtures()
-
-    def _load_fixtures(self) -> None:
-        """Load all fixture files from the directory."""
-        if not self.fixture_dir.exists():
-            return
-
-        for yaml_file in self.fixture_dir.glob("*.yaml"):
-            with open(yaml_file, encoding="utf-8") as f:
-                fixtures_in_file: dict[str, Any] = yaml.safe_load(f) or {}
-                self.fixtures.update(fixtures_in_file)
-
-    def extract(self, content: str, metadata: dict[str, Any] | None = None) -> ExtractionResult:
-        """Extract from fixture data.
-
-        Args:
-            content: Document identifier or content (used to find matching fixture).
-            metadata: Optional metadata containing fixture_id.
-
-        Returns:
-            ExtractionResult from fixture data.
-        """
-        fixture_id = metadata.get("fixture_id") if metadata else None
-        if not fixture_id:
-            fixture_id = content[:50] if content else "default"
-
-        fixture = self.fixtures.get(fixture_id)
-        if not fixture:
-            # Fallback: create empty result
-            return ExtractionResult(
-                fields=InvoiceFieldsExtracted(
-                    supplier_name=None,
-                    invoice_number=None,
-                    invoice_date=None,
-                    total_amount=None,
-                    currency=None,
-                    tax_id=None,
-                ),
-                confidence=FieldConfidence(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                model_id="fixture_v1",
-                latency_ms=0.0,
-            )
-
-        # Parse fixture data
-        fields_data = fixture.get("fields", {})
-        invoice_date_str = fields_data.get("invoice_date")
-        invoice_date: date | None = None
-        if invoice_date_str:
-            try:
-                invoice_date = date.fromisoformat(invoice_date_str)
-            except (ValueError, TypeError):
-                invoice_date = None
-
-        fields = InvoiceFieldsExtracted(
-            supplier_name=fields_data.get("supplier_name"),
-            invoice_number=fields_data.get("invoice_number"),
-            invoice_date=invoice_date,
-            total_amount=fields_data.get("total_amount"),
-            currency=fields_data.get("currency"),
-            tax_id=fields_data.get("tax_id"),
-        )
-
-        confidence_data = fixture.get("confidence", {})
-        confidence = FieldConfidence(
-            supplier_name=float(confidence_data.get("supplier_name", 0.9)),
-            invoice_number=float(confidence_data.get("invoice_number", 0.9)),
-            invoice_date=float(confidence_data.get("invoice_date", 0.9)),
-            total_amount=float(confidence_data.get("total_amount", 0.9)),
-            currency=float(confidence_data.get("currency", 0.7)),
-            tax_id=float(confidence_data.get("tax_id", 0.7)),
-        )
-
-        return ExtractionResult(
-            fields=fields,
-            confidence=confidence,
-            evidence_snippet=fixture.get("evidence_snippet"),
-            page_hint=fixture.get("page_hint", 1),
-            model_id="fixture_v1",
-            latency_ms=0.0,
+            supplier_name=score("supplier_name", fields.supplier_name),
+            invoice_number=score("invoice_number", fields.invoice_number),
+            invoice_date=score("invoice_date", fields.invoice_date),
+            total_amount=score("total_amount", fields.total_amount),
+            currency=score("currency", fields.currency),
+            tax_id=score("tax_id", fields.tax_id),
         )
 
 
@@ -293,7 +317,10 @@ class PDFExtractor(Extractor):
             ExtractionResult with extracted fields from PDF text.
         """
         try:
-            # Read PDF
+            logger.info(
+                "Starting PDF extraction: input_kind=%s",
+                "path" if isinstance(content, str) else "bytes",
+            )
             if isinstance(content, str):
                 pdf_file = Path(content)
                 with open(pdf_file, "rb") as f:
@@ -303,10 +330,18 @@ class PDFExtractor(Extractor):
                 pdf_reader = self.pdf_reader(io.BytesIO(content))
                 text = self._extract_text_from_pdf(pdf_reader)
 
-            # Apply text extraction
-            return self.text_extractor.extract(text, metadata)
-        except Exception as e:
-            raise ValueError(f"Failed to extract PDF: {e}") from e
+            if not text.strip():
+                raise ValueError("PDF contains no extractable text")
+
+            result = self.text_extractor.extract(text, metadata)
+            logger.info("Completed PDF extraction: pages=%d", len(pdf_reader.pages))
+            return result
+        except (OSError, PdfReadError, ValueError) as exc:
+            logger.exception(
+                "PDF extraction failed",
+                extra={"source_type": "pdf", "input_kind": "path" if isinstance(content, str) else "bytes"},
+            )
+            raise ValueError("Failed to extract PDF document") from exc
 
     def _extract_text_from_pdf(self, pdf_reader) -> str:  # type: ignore
         """Extract text from PDF reader.
@@ -319,5 +354,5 @@ class PDFExtractor(Extractor):
         """
         text = ""
         for page in pdf_reader.pages:
-            text += page.extract_text() + "\n"
+            text += (page.extract_text() or "") + "\n"
         return text

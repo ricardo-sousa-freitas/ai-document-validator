@@ -4,7 +4,7 @@ A production-shaped document validation service for B2B compliance platforms. Ex
 
 **Status**: MVP (core extraction + rules + evaluation harness) ✓  
 **Language**: Python 3.12+  
-**API Framework**: FastAPI (planned Phase 2)
+**API Framework**: FastAPI
 
 ---
 
@@ -22,7 +22,7 @@ pip install -e ".[dev]"
 
 ### 2. Run Evaluation Harness
 
-Validate the golden test set (6 supplier invoices):
+Validate the canonical document-pair golden set:
 
 ```bash
 python -m ai_document_validator.eval
@@ -94,14 +94,17 @@ src/ai_document_validator/
 │   ├── golden_set.py          # Golden set loader & metrics
 │   └── __init__.py
 │
-├── ui/                         # UI layer (API in Phase 2)
+├── api.py                      # FastAPI endpoints
+│
+├── ui/                         # Streamlit user interface (future)
 │   └── __init__.py
 │
 └── workflow/                   # Orchestration (future multi-step flows)
     └── __init__.py
 
 fixtures/
-└── invoices.yaml              # Golden test set (6 invoices)
+├── expected.yaml              # Hand-maintained expected outputs
+└── documents/                 # Real text/PDF golden inputs
 
 tests/
 ├── __init__.py
@@ -118,7 +121,7 @@ Document (text/PDF/fixture)
 [Extraction Layer]
   • TextExtractor (heuristic regex)
   • PDFExtractor (PyPDF2 + TextExtractor)
-  • FixtureExtractor (YAML fixtures)
+  • Document-pair golden evaluator (real text/PDF inputs)
     ↓
 ExtractionResult
   • InvoiceFieldsExtracted (supplier_name, invoice_number, invoice_date, total_amount, currency, tax_id)
@@ -142,9 +145,18 @@ Verdict
 
 **Heuristic approach** (regex + pattern matching):
 
-- `0.9 (HIGH)`: Direct regex match found and parsed successfully
-- `0.7 (MEDIUM)`: Partial or fuzzy match (e.g., optional fields like tax_id, currency)
-- `0.0 (MISSING)`: Field not found or parse failed
+Confidence describes extraction evidence quality, not a calibrated probability of correctness. The extractor records
+the winning regex tier and the number of candidate matches for each field:
+
+- `0.9 (HIGH)`: Most-specific regex tier with one candidate
+- `0.6 (SECONDARY)`: Less-specific regex tier, or two candidates requiring disambiguation
+- `0.3 (FALLBACK)`: Weak regex tier, or three or more candidates requiring heuristic selection
+- `0.0 (MISSING)`: Field is absent or cannot be parsed
+
+For example, a single `Total Amount` match receives high confidence, while a totals table containing `Subtotal`,
+`Net total`, and `Total Amount` is marked low-confidence even when the selected amount is correct. PDF extraction uses
+the same field scoring after converting the PDF text layer. Fixture extraction preserves the confidence values supplied
+by its hand-maintained fixture.
 
 When LLM integration is added, confidence will use embedding similarity or LLM confidence scores while reusing the same Verdict structure.
 
@@ -152,20 +164,24 @@ When LLM integration is added, confidence will use embedding similarity or LLM c
 
 **Critical rules** (failure → FAIL verdict):
 - `SupplierNameRule` — supplier_name required
-- `InvoiceDateRule` — date required and not too old
+- `InvoiceDatePresentRule` — date required
+- `InvoiceDateWithinMaxAgeRule` — date must not be too old
 - `TotalAmountRule` — amount required and > 0
 - `CurrencyRule` — currency must be in allowed list (when allowed_currencies is configured)
+
+**Soft rules** (failure → REVIEW verdict):
+- `ConfidenceThresholdRule` — present required fields must meet `review_confidence_threshold`
 
 **Verdict Logic**:
 - **PASS**: All rules pass
 - **FAIL**: Any critical rule fails
-- **REVIEW**: Reserved for future soft-rule failures (currently not in use)
+- **REVIEW**: No critical rule fails, but a soft rule fails
 
 ---
 
 ## Golden Test Set
 
-6 supplier invoices in `fixtures/invoices.yaml`:
+18 document/expected-output cases in `fixtures/expected.yaml`:
 
 | Fixture | Supplier | Status | Reason |
 |---------|----------|--------|--------|
@@ -318,22 +334,24 @@ evaluator.add_rule(InvoiceNumberFormatRule)
 
 ---
 
-## API Usage (Phase 2 — Not Yet Implemented)
+## API Usage
 
-When FastAPI is integrated:
+The API accepts JSON requests. Plain text is sent in `content`; PDF bytes are sent as base64 in
+`content_base64`. `source_name` determines the format unless an explicit `content_type` is supplied.
 
 ```bash
 # Start server
-python -m ai_document_validator.ui.api
+uv run python -m ai_document_validator.api
 
-# POST /v1/validate (multipart)
+# POST /v1/validate (plain text)
 curl -X POST http://localhost:8000/v1/validate \
-  -F "file=@invoice.pdf" \
-  -F "config={\"max_age_days\": 90, \"allowed_currencies\": [\"EUR\"]}"
+  -H "Content-Type: application/json" \
+  -d '{"source_name":"invoice.txt","content":"Supplier: Acme Corp\\nInvoice Number: INV-1\\nDate: 2026-09-01\\nAmount: 100.00\\nCurrency: EUR","config":{"document_type":"SUPPLIER_INVOICE","allowed_currencies":["EUR"]}}'
 
-# POST /v1/extract (extraction only)
+# POST /v1/extract (base64 PDF)
 curl -X POST http://localhost:8000/v1/extract \
-  -F "file=@invoice.pdf"
+  -H "Content-Type: application/json" \
+  -d '{"source_name":"invoice.pdf","content_base64":"<base64-pdf>","config":{"document_type":"SUPPLIER_INVOICE"}}'
 
 # GET /health
 curl http://localhost:8000/health
@@ -344,7 +362,7 @@ curl http://localhost:8000/health
 ```json
 {
   "status": "PASS",
-  "extracted_fields": {
+  "fields": {
     "supplier_name": "Acme Corp",
     "invoice_number": "INV-2024-001",
     "invoice_date": "2024-09-01",
@@ -352,7 +370,7 @@ curl http://localhost:8000/health
     "currency": "EUR",
     "tax_id": "VAT-DE-123456789"
   },
-  "field_confidence": {
+  "confidence": {
     "supplier_name": 0.95,
     "invoice_number": 0.95,
     "invoice_date": 0.95,
@@ -368,11 +386,9 @@ curl http://localhost:8000/health
     },
     // ... other rules
   ],
-  "metadata": {
-    "model_id": "heuristic_v1",
-    "latency_ms": 8.5,
-    "total_tokens": null
-  }
+  "model_id": "heuristic_v1",
+  "latency_ms": 8.5,
+  "total_tokens": null
 }
 ```
 
@@ -381,10 +397,10 @@ curl http://localhost:8000/health
 ## What's Next (With More Time)
 
 ### Phase 2: HTTP API
-- [ ] FastAPI endpoints for `/v1/validate`, `/v1/extract`, `/health`
-- [ ] Structured JSON logging with request ID, latency, verdict
-- [ ] OpenAPI schema documentation
-- [ ] Multipart file upload + base64 JSON config support
+- [x] FastAPI endpoints for `/v1/validate`, `/v1/extract`, `/health`
+- [x] Base64 JSON document input and strict Pydantic config validation
+- [x] OpenAPI schema generated from the request/response models
+- [ ] Structured JSON logging with request ID and verdict
 
 ### Phase 3: LLM Integration
 - [ ] Abstract extraction interface (heuristic | LLM via factory)
@@ -456,5 +472,5 @@ See `pyproject.toml`:
 For questions or issues:
 1. Check the golden set evaluation output (run `python -m ai_document_validator.eval`)
 2. Review test cases (`tests/test_rules.py`, `tests/test_extraction_pipeline.py`)
-3. Check fixture examples in `fixtures/invoices.yaml`
+3. Check document examples in `fixtures/documents/` and expected outputs in `fixtures/expected.yaml`
 4. See `AI_USAGE.md` for AI tool usage and design decisions

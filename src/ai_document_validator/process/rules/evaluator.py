@@ -4,12 +4,15 @@ from abc import ABC, abstractmethod
 from datetime import date, timedelta
 
 from ai_document_validator.common.constants import VerdictStatusValues
+from ai_document_validator.common.logging_config import setup_logger
 from ai_document_validator.config.config_types import (
     ExtractionResult,
     RuleConfig,
     RuleResult,
     Verdict,
 )
+
+logger = setup_logger(__name__)
 
 
 class Rule(ABC):
@@ -79,10 +82,10 @@ class InvoiceDateRule(Rule):
                 message="Invoice date is missing",
             )
 
-        # Check age
+        reference_date = config.reference_date or date.today()
         max_age = timedelta(days=config.max_age_days)
         invoice_date = extraction.fields.invoice_date
-        age = date.today() - invoice_date
+        age = reference_date - invoice_date
 
         if age > max_age:
             return RuleResult(
@@ -99,10 +102,88 @@ class InvoiceDateRule(Rule):
         )
 
 
+class InvoiceDatePresentRule(Rule):
+    """Rule: invoice_date must be present."""
+
+    rule_id = "invoice_date_present"
+    rule_description = "Invoice date must be present"
+    is_critical = True
+
+    def evaluate(self, extraction: ExtractionResult, config: RuleConfig) -> RuleResult:
+        """Check that an invoice date was extracted."""
+        passed = extraction.fields.invoice_date is not None
+        return RuleResult(
+            rule_id=self.rule_id,
+            passed=passed,
+            message="Invoice date is present" if passed else "Invoice date is missing",
+        )
+
+
+class InvoiceDateWithinMaxAgeRule(Rule):
+    """Rule: an available invoice date must be within the configured age."""
+
+    rule_id = "invoice_date_within_max_age"
+    rule_description = "Invoice date must be within the configured maximum age"
+    is_critical = True
+
+    def evaluate(self, extraction: ExtractionResult, config: RuleConfig) -> RuleResult:
+        """Check invoice-date recency without comparing a missing date."""
+        invoice_date = extraction.fields.invoice_date
+        if invoice_date is None:
+            return RuleResult(
+                rule_id=self.rule_id,
+                passed=True,
+                message="Invoice date recency is not applicable because the date is missing",
+            )
+
+        reference_date = config.reference_date or date.today()
+        age = reference_date - invoice_date
+        passed = age <= timedelta(days=config.max_age_days)
+        message = (
+            f"Invoice date {invoice_date} is within max age"
+            if passed
+            else f"Invoice date {invoice_date} exceeds max age of {config.max_age_days} days " f"(age: {age.days} days)"
+        )
+        return RuleResult(rule_id=self.rule_id, passed=passed, message=message)
+
+
+class ConfidenceThresholdRule(Rule):
+    """Rule: configured required fields must meet the review confidence threshold."""
+
+    rule_id = "field_confidence_threshold"
+    rule_description = "Required-field confidence must meet the configured review threshold"
+    is_critical = False
+
+    def evaluate(self, extraction: ExtractionResult, config: RuleConfig) -> RuleResult:
+        """Check confidence for configured required fields."""
+        threshold = config.review_confidence_threshold
+        if threshold is None:
+            return RuleResult(
+                rule_id=self.rule_id,
+                passed=True,
+                message="No confidence threshold configured",
+            )
+
+        required_fields = config.required_fields or []
+        low_confidence_fields = [
+            field_name
+            for field_name in required_fields
+            if getattr(extraction.fields, field_name, None) is not None
+            and getattr(extraction.confidence, field_name, 0.0) < threshold
+        ]
+        passed = not low_confidence_fields
+        message = (
+            "All required fields meet the confidence threshold"
+            if passed
+            else f"Low-confidence fields: {', '.join(low_confidence_fields)}"
+        )
+        return RuleResult(rule_id=self.rule_id, passed=passed, message=message)
+
+
 class TotalAmountRule(Rule):
     """Rule: total_amount must be present and greater than 0."""
 
-    rule_id = "total_amount_valid"
+    rule_id = "total_amount_positive"
     rule_description = "Total amount must be present and greater than 0"
     is_critical = True
 
@@ -140,7 +221,7 @@ class TotalAmountRule(Rule):
 class CurrencyRule(Rule):
     """Rule: if allowed_currencies is configured, currency must be in the list."""
 
-    rule_id = "currency_allowed"
+    rule_id = "currency_in_allowed_list"
     rule_description = "Currency must be in allowed list (if configured)"
     is_critical = True  # Critical: currency restriction must be honored
 
@@ -189,9 +270,11 @@ class RulesEvaluator:
 
     DEFAULT_RULES: list[type[Rule]] = [
         SupplierNameRule,
-        InvoiceDateRule,
+        InvoiceDatePresentRule,
+        InvoiceDateWithinMaxAgeRule,
         TotalAmountRule,
         CurrencyRule,
+        ConfidenceThresholdRule,
     ]
 
     def __init__(self, rules: list[type[Rule]] | None = None) -> None:
@@ -213,6 +296,7 @@ class RulesEvaluator:
         Returns:
             Verdict with status (PASS/FAIL/REVIEW) and rule results.
         """
+        logger.info("Starting rule evaluation: rule_count=%d", len(self.rule_instances))
         rule_results: list[RuleResult] = []
         critical_failures = False
         soft_failures = False
@@ -234,6 +318,9 @@ class RulesEvaluator:
             status = VerdictStatusValues.REVIEW
         else:
             status = VerdictStatusValues.PASS
+
+        failed_rule_count = sum(not result.passed for result in rule_results)
+        logger.info("Completed rule evaluation: status=%s failed_rules=%d", status, failed_rule_count)
 
         return Verdict(
             status=status,

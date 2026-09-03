@@ -1,0 +1,285 @@
+# Golden set -- ground truth for the evaluation harness.
+#
+# Each entry pairs ONE input document with the values a careful human reads off
+# that document, plus the verdict the rules engine must return for it under the
+# evaluation configuration in src/ai_document_validator/config/rule_validation_config.yaml.
+#
+# Maintained by hand. Never regenerate this file from extractor output: the
+# moment ground truth is produced by the thing under test, the eval measures
+# nothing.
+#
+# `document` is resolved relative to fixtures/documents/.
+# Fixtures with both a .txt and a .pdf twin are listed once per format so the
+# harness can report extraction quality separately from PDF-parsing quality.
+
+cases:
+
+  - id: inv_001_clean_eur
+    document: inv_001_clean_eur.txt
+    tests: Baseline. Conventional English layout, ISO date, thousands separator.
+    expected_fields:
+      supplier_name: "Nordwind Logistik GmbH"
+      invoice_number: "INV-2026-0417"
+      invoice_date: "2026-08-28"
+      total_amount: 4820.50
+      currency: "EUR"
+      tax_id: "DE811234567"
+    expected_verdict: PASS
+    expected_failed_rules: []
+
+  - id: inv_001_clean_eur__pdf
+    document: inv_001_clean_eur.pdf
+    tests: Same document as a text-layer PDF. Isolates the loader from the extractor.
+    expected_fields:
+      supplier_name: "Nordwind Logistik GmbH"
+      invoice_number: "INV-2026-0417"
+      invoice_date: "2026-08-28"
+      total_amount: 4820.50
+      currency: "EUR"
+      tax_id: "DE811234567"
+    expected_verdict: PASS
+    expected_failed_rules: []
+
+  - id: inv_002_european_format
+    document: inv_002_european_format.txt
+    tests: >
+      Spanish labels, DD/MM/YYYY date, European decimal notation (1.234,56 where
+      the dot is a thousands separator), tax id under the CIF label. Parsing
+      1.234,56 as 1.234 is the single most expensive silent bug in this domain.
+    expected_fields:
+      supplier_name: "Suministros Industriales Levante, S.L."
+      invoice_number: "F-2026/1188"
+      invoice_date: "2026-07-14"
+      total_amount: 1234.56
+      currency: "EUR"
+      tax_id: "B12345678"
+    expected_verdict: PASS
+    expected_failed_rules: []
+
+  - id: inv_002_european_format__pdf
+    document: inv_002_european_format.pdf
+    tests: PDF twin of the European-format case.
+    expected_fields:
+      supplier_name: "Suministros Industriales Levante, S.L."
+      invoice_number: "F-2026/1188"
+      invoice_date: "2026-07-14"
+      total_amount: 1234.56
+      currency: "EUR"
+      tax_id: "B12345678"
+    expected_verdict: PASS
+    expected_failed_rules: []
+
+  - id: inv_003_no_tax_id
+    document: inv_003_no_tax_id.txt
+    tests: >
+      Optional field genuinely absent. tax_id must come back null with
+      confidence 0.0 -- not hallucinated, and not treated as a rule failure,
+      since it is not in required_fields.
+    expected_fields:
+      supplier_name: "Brightwell Consulting Ltd"
+      invoice_number: "BW-2026-3390"
+      invoice_date: "2026-08-05"
+      total_amount: 6400.00
+      currency: "GBP"
+      tax_id: null
+    expected_verdict: PASS
+    expected_failed_rules: []
+
+  - id: inv_004_usd_not_allowed
+    document: inv_004_usd_not_allowed.txt
+    tests: >
+      Currency outside allowed_currencies. Also a long-form English date
+      ("August 19, 2026") and the invoice number behind an "Invoice #" label.
+    expected_fields:
+      supplier_name: "Meridian Components Inc."
+      invoice_number: "MCI-88214"
+      invoice_date: "2026-08-19"
+      total_amount: 9750.00
+      currency: "USD"
+      tax_id: "34-1928374"
+    expected_verdict: FAIL
+    expected_failed_rules: ["currency_in_allowed_list"]
+
+  - id: inv_004_usd_not_allowed__pdf
+    document: inv_004_usd_not_allowed.pdf
+    tests: PDF twin of the disallowed-currency case.
+    expected_fields:
+      supplier_name: "Meridian Components Inc."
+      invoice_number: "MCI-88214"
+      invoice_date: "2026-08-19"
+      total_amount: 9750.00
+      currency: "USD"
+      tax_id: "34-1928374"
+    expected_verdict: FAIL
+    expected_failed_rules: ["currency_in_allowed_list"]
+
+  - id: inv_005_stale_date
+    document: inv_005_stale_date.txt
+    tests: >
+      175 days old against max_age_days=90. Everything else is valid, so this
+      fixture fails on exactly one rule -- it catches a rules engine that
+      short-circuits or over-reports.
+    expected_fields:
+      supplier_name: "Atlantic Paper Supply BV"
+      invoice_number: "APS-2026-0021"
+      invoice_date: "2026-03-12"
+      total_amount: 2310.00
+      currency: "EUR"
+      tax_id: "NL857123456B01"
+    expected_verdict: FAIL
+    expected_failed_rules: ["invoice_date_within_max_age"]
+
+  - id: inv_006_zero_amount
+    document: inv_006_zero_amount.txt
+    tests: >
+      total_amount present but zero. Distinguishes "> 0" from a truthiness
+      check -- 0.0 is falsy in Python, so a missing-field check and a
+      not-positive check must produce different rule failures.
+    expected_fields:
+      supplier_name: "Clearpath Software Oy"
+      invoice_number: "CP-2026-7741"
+      invoice_date: "2026-08-30"
+      total_amount: 0.00
+      currency: "EUR"
+      tax_id: "FI28765432"
+    expected_verdict: FAIL
+    expected_failed_rules: ["total_amount_positive"]
+
+  - id: inv_007_missing_date
+    document: inv_007_missing_date.txt
+    tests: >
+      No date anywhere in the document. The recency rule must be reported as
+      not-applicable rather than crashing or failing on a null comparison.
+    expected_fields:
+      supplier_name: "Helios Energy Partners SAS"
+      invoice_number: "HEP-2026-0455"
+      invoice_date: null
+      total_amount: 3150.00
+      currency: "EUR"
+      tax_id: "FR40123456824"
+    expected_verdict: FAIL
+    expected_failed_rules: ["invoice_date_present"]
+
+  - id: inv_008_totals_table
+    document: inv_008_totals_table.txt
+    tests: >
+      The adversarial one. Six currency-shaped numbers, four of them behind a
+      label containing "total" (Subtotal, Net total, Total Amount) and a
+      negative discount line. A regex that takes the first number after /total/i
+      returns 2550.00; one that takes the largest returns 2943.47 by luck but
+      breaks on inv_009. Correct answer requires anchoring on the most specific
+      label.
+    expected_fields:
+      supplier_name: "Krantz Prazisionsteile GmbH & Co. KG"
+      invoice_number: "KP-2026-10042"
+      invoice_date: "2026-08-11"
+      total_amount: 2943.47
+      currency: "EUR"
+      tax_id: "DE145879632"
+    expected_verdict: REVIEW
+    expected_failed_rules: ["field_confidence_threshold"]
+
+  - id: inv_008_totals_table__pdf
+    document: inv_008_totals_table.pdf
+    tests: PDF twin of the totals-table case.
+    expected_fields:
+      supplier_name: "Krantz Prazisionsteile GmbH & Co. KG"
+      invoice_number: "KP-2026-10042"
+      invoice_date: "2026-08-11"
+      total_amount: 2943.47
+      currency: "EUR"
+      tax_id: "DE145879632"
+    expected_verdict: REVIEW
+    expected_failed_rules: ["field_confidence_threshold"]
+
+  - id: inv_009_credit_note
+    document: inv_009_credit_note.txt
+    tests: >
+      Negative total (credit note). Guards the "> 0" rule against an extractor
+      that strips the minus sign while parsing.
+    expected_fields:
+      supplier_name: "Oriente Textil Lda"
+      invoice_number: "NC-2026-0093"
+      invoice_date: "2026-08-22"
+      total_amount: -1200.00
+      currency: "EUR"
+      tax_id: "503998211"
+    expected_verdict: FAIL
+    expected_failed_rules: ["total_amount_positive"]
+
+  - id: inv_010_ocr_noise
+    document: inv_010_ocr_noise.txt
+    tests: >
+      Simulated OCR damage: 1/l, 0/O and ss/8 substitutions, spaced thousands
+      separator, broken word wrap. Expect the heuristic extractor to MISS here
+      and the LLM extractor to recover most fields. This is the fixture that
+      justifies the hybrid design -- if it passes on the heuristic path alone,
+      the LLM adapter has no measurable reason to exist.
+    expected_fields:
+      supplier_name: "Kaiserstrasse Handel GmbH"
+      invoice_number: "INV-2026-0881"
+      invoice_date: "2026-08-09"
+      total_amount: 3450.00
+      currency: "EUR"
+      tax_id: "DE812345678"
+    expected_verdict: REVIEW
+    expected_failed_rules: []
+    expected_low_confidence_fields: ["supplier_name", "invoice_number", "invoice_date", "total_amount"]
+
+  - id: inv_010_ocr_noise__pdf
+    document: inv_010_ocr_noise.pdf
+    tests: PDF twin of the OCR-damage case.
+    expected_fields:
+      supplier_name: "Kaiserstrasse Handel GmbH"
+      invoice_number: "INV-2026-0881"
+      invoice_date: "2026-08-09"
+      total_amount: 3450.00
+      currency: "EUR"
+      tax_id: "DE812345678"
+    expected_verdict: REVIEW
+    expected_failed_rules: []
+    expected_low_confidence_fields: ["supplier_name", "invoice_number", "invoice_date", "total_amount"]
+
+  - id: inv_011_multipage__txt
+    document: inv_011_multipage.txt
+    tests: >
+      Text twin of the multi-page case; pages are separated by a form feed
+      (\f), which is what pdftotext-style loaders emit.
+    expected_fields:
+      supplier_name: "Vantage Maritime Services Ltd"
+      invoice_number: "VMS-2026-0664"
+      invoice_date: "2026-07-30"
+      total_amount: 2930.00
+      currency: "GBP"
+      tax_id: "GB412775821"
+    expected_verdict: PASS
+    expected_failed_rules: []
+    expected_evidence_page: 2
+
+  - id: inv_011_multipage
+    document: inv_011_multipage.pdf
+    tests: >
+      Two pages, totals on page 2. Checks that the loader concatenates pages and
+      that the evidence snippet reports page 2, not page 1.
+    expected_fields:
+      supplier_name: "Vantage Maritime Services Ltd"
+      invoice_number: "VMS-2026-0664"
+      invoice_date: "2026-07-30"
+      total_amount: 2930.00
+      currency: "GBP"
+      tax_id: "GB412775821"
+    expected_verdict: PASS
+    expected_failed_rules: []
+    expected_evidence_page: 2
+
+  - id: inv_012_scanned_no_text
+    document: inv_012_scanned_no_text.pdf
+    tests: >
+      Image-only PDF, zero extractable characters. OCR is out of scope, so the
+      correct behaviour is a loud, typed failure -- not an empty string handed
+      downstream, which would surface as "all six fields missing" and blame the
+      extractor for a loader problem.
+    expected_extraction_status: UNSUPPORTED_DOCUMENT
+    expected_fields: null
+    expected_verdict: REVIEW
+    expected_failed_rules: []
