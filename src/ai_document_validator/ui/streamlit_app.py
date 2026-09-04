@@ -10,9 +10,9 @@ from pydantic import ValidationError
 
 from ai_document_validator.common.constants import DocumentType, VerdictStatusValues
 from ai_document_validator.common.logging_config import setup_logger
-from ai_document_validator.config.config_types import ExtractionResult
 from ai_document_validator.config.validation import RuleConfigModel
-from ai_document_validator.process.extraction.extractors import PDFExtractor, TextExtractor, UnsupportedDocumentError
+from ai_document_validator.process.extraction.extractors import LLMExtractor, PDFExtractor, UnsupportedDocumentError
+from ai_document_validator.process.extraction.hybrid import HybridExtractionResult, HybridExtractor
 from ai_document_validator.process.extraction.selector import select_extractor
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
@@ -40,14 +40,20 @@ def _build_rule_config(
     )
 
 
-def _extract_uploaded_document(uploaded_file: Any) -> ExtractionResult:
+def _extract_uploaded_document(uploaded_file: Any, config: RuleConfigModel) -> HybridExtractionResult:
     """Extract fields from a Streamlit-uploaded text or PDF document."""
     extractor = select_extractor(uploaded_file.name, uploaded_file.type or None)
     content = uploaded_file.getvalue()
     metadata = {"source_name": uploaded_file.name}
-    if isinstance(extractor, PDFExtractor):
-        return extractor.extract(content, metadata)
-    return TextExtractor().extract(content.decode("utf-8"), metadata)
+    if not isinstance(extractor, PDFExtractor):
+        content = content.decode("utf-8")
+    hybrid_extractor = HybridExtractor(
+        heuristic_extractor=extractor,
+        required_fields=config.required_fields or [],
+        confidence_threshold=config.review_confidence_threshold or 0.0,
+        fallback_extractor=LLMExtractor(),
+    )
+    return hybrid_extractor.extract(content, metadata)
 
 
 def _render_verdict(status: str) -> None:
@@ -62,11 +68,14 @@ def _render_verdict(status: str) -> None:
 
 def _render_results(uploaded_file: Any, config: RuleConfigModel) -> None:
     """Extract, validate, and render a document result."""
-    extraction = _extract_uploaded_document(uploaded_file)
+    hybrid_result = _extract_uploaded_document(uploaded_file, config)
+    extraction = hybrid_result.extraction
     verdict = RulesEvaluator().evaluate(extraction, config.to_rule_config())
     logger.info("Streamlit validation completed: status=%s", verdict.status)
 
     _render_verdict(verdict.status)
+    if hybrid_result.fallback_required:
+        st.info("LLM fallback is recommended but unavailable: " + ", ".join(hybrid_result.fallback_reasons))
     left_column, right_column = st.columns(2)
     with left_column:
         st.subheader("Extracted Fields")

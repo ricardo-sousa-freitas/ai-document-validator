@@ -1,6 +1,7 @@
 """Document extraction interfaces and implementations."""
 
 import io
+import json
 import re
 from abc import ABC, abstractmethod
 from datetime import date, datetime
@@ -10,6 +11,7 @@ from typing import Any, NamedTuple
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from ai_document_validator.clients.azure_llm_client import AzureLLMClient, LLMCompletion
 from ai_document_validator.common.constants import (
     CONFIDENCE_FALLBACK,
     CONFIDENCE_HIGH,
@@ -17,6 +19,7 @@ from ai_document_validator.common.constants import (
     CONFIDENCE_SECONDARY,
 )
 from ai_document_validator.common.logging_config import setup_logger
+from ai_document_validator.config.config_loader_prompts import ConfigLoaderPrompts
 from ai_document_validator.config.config_types import (
     ExtractionResult,
     FieldConfidence,
@@ -321,24 +324,9 @@ class PDFExtractor(Extractor):
             ExtractionResult with extracted fields from PDF text.
         """
         try:
-            logger.info(
-                "Starting PDF extraction: input_kind=%s",
-                "path" if isinstance(content, str) else "bytes",
-            )
-            if isinstance(content, str):
-                pdf_file = Path(content)
-                with open(pdf_file, "rb") as f:
-                    pdf_reader = self.pdf_reader(f)
-                    text = self._extract_text_from_pdf(pdf_reader)
-            else:
-                pdf_reader = self.pdf_reader(io.BytesIO(content))
-                text = self._extract_text_from_pdf(pdf_reader)
-
-            if not text.strip():
-                raise UnsupportedDocumentError("PDF contains no extractable text")
-
+            text, page_count = self._load_text(content)
             result = self.text_extractor.extract(text, metadata)
-            logger.info("Completed PDF extraction: pages=%d", len(pdf_reader.pages))
+            logger.info("Completed PDF extraction: pages=%d", page_count)
             return result
         except UnsupportedDocumentError:
             logger.warning("PDF extraction unsupported: no text layer")
@@ -349,6 +337,51 @@ class PDFExtractor(Extractor):
                 extra={"source_type": "pdf", "input_kind": "path" if isinstance(content, str) else "bytes"},
             )
             raise ValueError("Failed to extract PDF document") from exc
+
+    def extract_text(self, content: str | bytes) -> str:
+        """Extract the PDF text used by downstream fallback processing.
+
+        Args:
+            content: PDF file path or PDF bytes.
+
+        Returns:
+            Concatenated text from all PDF pages.
+
+        Raises:
+            UnsupportedDocumentError: If the PDF has no extractable text.
+            ValueError: If the PDF cannot be read.
+        """
+        try:
+            text, _ = self._load_text(content)
+            return text
+        except UnsupportedDocumentError:
+            logger.warning("PDF text extraction unsupported: no text layer")
+            raise
+        except (OSError, PdfReadError, ValueError) as exc:
+            logger.exception(
+                "PDF text extraction failed",
+                extra={"source_type": "pdf", "input_kind": "path" if isinstance(content, str) else "bytes"},
+            )
+            raise ValueError("Failed to extract PDF document") from exc
+
+    def _load_text(self, content: str | bytes) -> tuple[str, int]:
+        """Load and validate PDF text while retaining the page count."""
+        logger.info(
+            "Starting PDF extraction: input_kind=%s",
+            "path" if isinstance(content, str) else "bytes",
+        )
+        if isinstance(content, str):
+            pdf_file = Path(content)
+            with open(pdf_file, "rb") as file_handle:
+                pdf_reader = self.pdf_reader(file_handle)
+                text = self._extract_text_from_pdf(pdf_reader)
+        else:
+            pdf_reader = self.pdf_reader(io.BytesIO(content))
+            text = self._extract_text_from_pdf(pdf_reader)
+
+        if not text.strip():
+            raise UnsupportedDocumentError("PDF contains no extractable text")
+        return text, len(pdf_reader.pages)
 
     def _extract_text_from_pdf(self, pdf_reader) -> str:  # type: ignore
         """Extract text from PDF reader.
@@ -363,3 +396,88 @@ class PDFExtractor(Extractor):
         for page in pdf_reader.pages:
             text += (page.extract_text() or "") + "\n"
         return text
+
+
+class LLMExtractor(Extractor):
+    """Extract invoice fields with an optional Azure OpenAI fallback."""
+
+    def __init__(
+        self,
+        llm_client: AzureLLMClient | None = None,
+        prompt_loader: ConfigLoaderPrompts | None = None,
+    ) -> None:
+        """Initialize the Azure client and invoice extraction prompts."""
+        self.llm_client = llm_client or AzureLLMClient()
+        self.prompt_loader = prompt_loader or ConfigLoaderPrompts()
+
+    def extract(self, content: str | bytes, metadata: dict[str, Any] | None = None) -> ExtractionResult:
+        """Extract fields by requesting structured JSON from the configured LLM.
+
+        Args:
+            content: Text extracted from a document.
+            metadata: Optional document metadata.
+
+        Returns:
+            Structured extraction result with LLM provider metadata.
+
+        Raises:
+            TypeError: If binary PDF content is supplied instead of extracted text.
+            ValueError: If the LLM response is not valid invoice JSON.
+        """
+        if isinstance(content, bytes):
+            raise TypeError("LLMExtractor requires document text, not PDF bytes")
+
+        prompts = self.prompt_loader.prompts
+        completion = self.llm_client.extract_invoice(
+            prompts.system_prompt,
+            prompts.extraction_prompt.format(document_text=content),
+        )
+        fields = self._parse_fields(completion)
+        logger.info("LLM extraction completed: model_id=%s", completion.model_id)
+        return ExtractionResult(
+            fields=fields,
+            confidence=self._llm_confidence(fields),
+            evidence_snippet=content[:200] if content else None,
+            page_hint=metadata.get("page_hint") if metadata else None,
+            model_id=completion.model_id,
+            latency_ms=completion.latency_ms,
+        )
+
+    def _parse_fields(self, completion: LLMCompletion) -> InvoiceFieldsExtracted:
+        """Parse and validate the required invoice fields from an LLM JSON response."""
+        try:
+            data: dict[str, Any] = json.loads(completion.content)
+            invoice_date_value = data.get("invoice_date")
+            total_amount_value = data.get("total_amount")
+            return InvoiceFieldsExtracted(
+                supplier_name=self._optional_string(data.get("supplier_name")),
+                invoice_number=self._optional_string(data.get("invoice_number")),
+                invoice_date=date.fromisoformat(invoice_date_value) if invoice_date_value else None,
+                total_amount=float(total_amount_value) if total_amount_value is not None else None,
+                currency=self._optional_string(data.get("currency")),
+                tax_id=self._optional_string(data.get("tax_id")),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("LLM response does not match the invoice field schema") from exc
+
+    @staticmethod
+    def _optional_string(value: Any) -> str | None:
+        """Convert JSON string values while preserving nulls."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("LLM invoice fields must be strings or null")
+        return value
+
+    @staticmethod
+    def _llm_confidence(fields: InvoiceFieldsExtracted) -> FieldConfidence:
+        """Assign high evidence confidence to fields returned in structured LLM JSON."""
+        # Future work: replace presence-based constants with calibrated confidence from the LLM or provider metadata.
+        return FieldConfidence(
+            supplier_name=CONFIDENCE_HIGH if fields.supplier_name else CONFIDENCE_MISSING,
+            invoice_number=CONFIDENCE_HIGH if fields.invoice_number else CONFIDENCE_MISSING,
+            invoice_date=CONFIDENCE_HIGH if fields.invoice_date else CONFIDENCE_MISSING,
+            total_amount=CONFIDENCE_HIGH if fields.total_amount is not None else CONFIDENCE_MISSING,
+            currency=CONFIDENCE_HIGH if fields.currency else CONFIDENCE_MISSING,
+            tax_id=CONFIDENCE_HIGH if fields.tax_id else CONFIDENCE_MISSING,
+        )

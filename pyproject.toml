@@ -31,6 +31,9 @@ dev = [
     "pillow>=10.0.0",
     "reportlab>=4.0.0",
 ]
+azure = [
+    "openai>=3.8.0",
+]
 
 [project.scripts]
 ai-document-validator = "ai_document_validator.main:main"
