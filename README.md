@@ -10,14 +10,38 @@ A production-shaped document validation service for B2B compliance platforms. Ex
 
 ## Quick Start
 
+Run these commands from the repository root, the directory containing `pyproject.toml`.
+
 ### 1. Install Dependencies
 
 ```bash
-# Using uv (recommended)
-uv sync --all-groups
+# Using uv (recommended; installs test and quality tools)
+uv sync --extra dev
+
+# Optional: also install the Azure OpenAI SDK for live LLM fallback calls
+uv sync --extra dev --extra azure
 
 # Or using pip
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
+
+# Optional Azure OpenAI support with pip
+python -m pip install -e ".[dev,azure]"
+```
+
+Copy the environment template if you want a local `.env` file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+The application runs without Azure credentials using heuristic extraction. To enable
+the optional LLM fallback, install the `azure` extra and set these variables in `.env`:
+
+```dotenv
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your_api_key
+AZURE_OPENAI_API_VERSION=your_api_version
+AZURE_OPENAI_DEPLOYMENT=your_deployment_name
 ```
 
 ### 2. Run Evaluation Harness
@@ -25,7 +49,7 @@ pip install -e ".[dev]"
 Validate the canonical document-pair golden set:
 
 ```bash
-python -m ai_document_validator.eval
+uv run python -m ai_document_validator.eval
 ```
 
 **Output**:
@@ -33,27 +57,31 @@ python -m ai_document_validator.eval
 - Field-level exact-match rates per field
 - Detailed failure report with rule explanations
 
+The command intentionally exits with code `1` when the current extraction output does
+not fully agree with the hand-maintained expected labels. Read the printed metrics and
+failure details; this is a quality report, not a server startup check.
+
 ### 3. Run Unit & Integration Tests
 
 ```bash
-pytest tests/ -v                          # All tests
-pytest tests/ -v -m unit                  # Unit tests only
-pytest tests/ -v -m integration           # Integration tests only
-pytest tests/ --cov --cov-report=html     # With coverage (opens HTML report)
+uv run pytest tests/ -v                          # All tests
+uv run pytest tests/ -v -m unit                  # Unit tests only
+uv run pytest tests/ -v -m integration           # Integration tests only
+uv run pytest tests/ --cov --cov-report=html     # With coverage
 ```
 
 ### 4. Code Quality Checks
 
 ```bash
 # Type checking (strict mode)
-mypy src/ --config-file pyproject.toml
+uv run mypy src/ --config-file pyproject.toml
 
 # Formatting & linting
-black src/ tests/
-isort src/ tests/
-flake8 src/ tests/ --max-line-length 120 --max-complexity 10
-pylint src/ --rcfile=.pylintrc
-vulture src/ --min-confidence 100
+uv run black src/ tests/
+uv run isort src/ tests/
+uv run flake8 src/ tests/ --max-line-length 120 --max-complexity 10
+uv run pylint src/ --rcfile=.pylintrc
+uv run vulture src/ --min-confidence 100
 ```
 
 ---
@@ -158,7 +186,36 @@ For example, a single `Total Amount` match receives high confidence, while a tot
 the same field scoring after converting the PDF text layer. Fixture extraction preserves the confidence values supplied
 by its hand-maintained fixture.
 
-When LLM integration is added, confidence will use embedding similarity or LLM confidence scores while reusing the same Verdict structure.
+### Hybrid Extraction Strategy
+
+Every document runs through the local heuristic extractor first. The service records `llm_fallback_required` and
+`llm_fallback_reasons` when a required field is missing or when a present required field falls below the configured
+confidence threshold. The API and Streamlit application provide an optional Azure OpenAI fallback. When
+configured, the fallback receives the extracted text for text
+documents and text-layer PDFs. If Azure is unavailable, the heuristic result is
+retained and the fallback failure is reported. This keeps the default path fast,
+deterministic, and runnable without credentials.
+
+The fallback returns structured fields and provider metadata through the same
+`ExtractionResult` and `Verdict` structures. LLM confidence values are currently
+presence-based rather than calibrated probabilities. `_llm_confidence` currently
+assigns a fixed high value to any non-null field, so those values must not be read as
+model probabilities.
+
+**First calibration approach**:
+
+1. Ask the model for a bounded confidence score per field in the structured response,
+  alongside the extracted value and a short evidence reference.
+2. Validate and clamp those scores to `[0.0, 1.0]`; use `0.0` for a missing value and
+  retain the current safe fallback when the score is absent or malformed.
+3. Compare scores with the human-reviewed `fixtures/expected.yaml` labels and fit a
+  simple per-field calibration mapping, such as isotonic regression, on a larger
+  labeled set.
+4. Use the calibrated scores for `ConfidenceThresholdRule`, and monitor calibration
+  error and field accuracy before changing review thresholds.
+
+This is future work because the current Azure response contract returns field values,
+not confidence scores or token log probabilities.
 
 ### Rule Evaluation Logic
 
@@ -181,48 +238,21 @@ When LLM integration is added, confidence will use embedding similarity or LLM c
 
 ## Golden Test Set
 
-18 document/expected-output cases in `fixtures/expected.yaml`:
-
-| Fixture | Supplier | Status | Reason |
-|---------|----------|--------|--------|
-| `invoice_001` | Acme Corporation | PASS | All fields present, recent, EUR allowed |
-| `invoice_002` | TechSupply Ltd | PASS | All fields present, recent, GBP allowed |
-| `invoice_003` | Global Industries | FAIL | Currency USD not in [EUR, GBP] |
-| `invoice_004_missing_date` | PartnerCo | FAIL | Missing required invoice_date |
-| `invoice_005_zero_amount` | ZeroCost Supplier | FAIL | Amount is 0 (must be > 0) |
-| `invoice_006_wrong_currency` | JPYSupplier | FAIL | Currency JPY not in [EUR, GBP] |
+18 document/expected-output cases in `fixtures/expected.yaml`, including text-layer
+PDF twins, European number formats, missing fields, stale dates, invalid currencies,
+ambiguous totals, OCR noise, multipage documents, and a scanned PDF with no text layer.
 
 **Running evaluation harness:**
 
 ```bash
-python -m ai_document_validator.eval
+uv run python -m ai_document_validator.eval
 ```
 
-**Expected output**:
-```
-================================================================================
-EVALUATION HARNESS RESULTS
-================================================================================
-
-VERDICT LEVEL:
-  Total cases: 6
-  Passed: 2
-  Failed: 4
-  Agreement rate: 100.0%
-
-FIELD LEVEL (exact-match rate):
-  ✓ supplier_name: 100.0%
-  ✓ invoice_number: 100.0%
-  ✓ invoice_date: 83.3%
-  ✓ total_amount: 100.0%
-  ✓ currency: 83.3%
-  ~ tax_id: 50.0%
-
-FAILURES (0 issues):
-✓ All tests passed!
-
-================================================================================
-```
+The command reports the number of cases, verdict agreement, exact-match rate for
+each field, and every mismatch with expected and actual values. The current
+baseline is intentionally not hidden: run the command locally to see the latest
+metrics after any extractor or rule change. The harness exits with code `1` when
+verdict agreement is incomplete.
 
 ---
 
@@ -230,32 +260,42 @@ FAILURES (0 issues):
 
 ### 1. Extraction: Heuristic vs LLM
 
-**Current**: Heuristic (regex + pattern matching)
+**Current**: Heuristic-first hybrid extraction (regex + pattern matching with an
+optional Azure OpenAI fallback)
 
 **Why**: 
 - Fast (<10ms vs 500ms-2s for LLM)
 - Deterministic and testable
-- No API keys or cost per document
-- Reviewers can run without credentials
+- No API keys or model cost on the default path
+- Reviewers can run the full heuristic path without credentials
 
-**When to use LLM**:
+**When not to use an LLM**:
+- Documents follow a stable, structured layout that heuristics handle reliably
+- Low latency, offline execution, privacy, or deterministic repeatability is required
+- API cost is not justified by the expected accuracy improvement
+
+**When to use the LLM fallback**:
 - Free-form invoice layouts (not structured/templated)
 - Need semantic understanding (e.g., "invoice total" vs "line item total")
 - Cost per document is acceptable (<0.01 USD)
 - Latency tolerance is >500ms
 
-**Migration path**: Extract a `confidence` score for each field. When LLM is added, replace heuristic confidence with LLM embedding similarity or model confidence. Verdict structure remains unchanged.
+The LLM fallback is optional and is invoked only when configured required fields are
+missing or below the confidence threshold. Its Azure settings are documented in
+`.env.example`.
 
 ### 2. Fixtures vs Real OCR
 
-**Current**: YAML fixtures (no PDF processing)
+**Current**: Text and PDF extraction are supported. Scanned PDFs without a text layer
+are reported as unsupported.
 
 **Why**:
 - Reproducible and version-controllable
 - Reviewers don't need OCR libraries or PDF credentials
 - Allows testing logic without document processing
 
-**Fallback**: TextExtractor + PDFExtractor classes are implemented and functional; switch to real PDFs by changing `EXTRACTION_MODE` environment variable.
+**Fallback**: `TextExtractor` and `PDFExtractor` are used automatically based on the
+uploaded file type or source extension. No extraction-mode environment variable is required.
 
 ### 3. Rules Engine Design
 
@@ -296,13 +336,16 @@ evaluator.add_rule(InvoiceNumberFormatRule)
 
 ### Estimated Per-Document Cost & Latency
 
+These are engineering estimates, not measurements from a live Azure deployment.
+Actual values depend on document length, model deployment, network conditions, and
+provider pricing. Local tests measure the heuristic and rules path only.
 | Component | Latency | Cost |
 |-----------|---------|------|
 | Heuristic extraction | 5-10ms | $0.00 |
-| LLM extraction (GPT-4o) | 500-1000ms | $0.001-0.01 |
+| LLM extraction (Azure deployment) | 500-2000ms | $0.001-0.01 |
 | Rules evaluation | 1-2ms | $0.00 |
 | **Total (heuristic)** | **10ms** | **$0.00** |
-| **Total (LLM)** | **600ms** | **$0.002** |
+| **Total (LLM)** | **~500-2000ms + local processing** | **provider-dependent** |
 
 ### What to Monitor in Production
 
@@ -344,6 +387,8 @@ PDFs with no extractable text layer return `UNSUPPORTED_DOCUMENT`; corrupted PDF
 # Start server
 uv run python -m ai_document_validator.api
 
+# The API is available at http://localhost:8000; use a second terminal for requests.
+
 # POST /v1/validate (plain text)
 curl -X POST http://localhost:8000/v1/validate \
   -H "Content-Type: application/json" \
@@ -360,14 +405,16 @@ curl http://localhost:8000/health
 
 ## Streamlit Interface
 
-Run the local document-validation interface:
+Open a second terminal from the repository root and run:
 
 ```bash
 uv run streamlit run src/ai_document_validator/ui/streamlit_app.py
 ```
 
-Upload a `.txt` or `.pdf` invoice, set the date and currency rules, and inspect the extracted fields,
-confidence values, evidence preview, and rule verdicts.
+Streamlit normally opens at `http://localhost:8501`. Upload a `.txt` or `.pdf` invoice,
+set the date and currency rules, and select **Validate Invoice** to inspect the extracted
+fields, confidence values, evidence preview, and rule verdicts. Stop either service with
+`Ctrl+C`.
 
 **Response** (example):
 
@@ -390,6 +437,8 @@ confidence values, evidence preview, and rule verdicts.
     "currency": 0.90,
     "tax_id": 0.85
   },
+  "llm_fallback_required": false,
+  "llm_fallback_reasons": [],
   "rule_results": [
     {
       "rule_id": "supplier_name_required",
@@ -415,11 +464,12 @@ confidence values, evidence preview, and rule verdicts.
 - [ ] Structured JSON logging with request ID and verdict
 
 ### Phase 3: LLM Integration
-- [ ] Abstract extraction interface (heuristic | LLM via factory)
-- [ ] OpenAI GPT-4o integration for complex layouts
+- [x] Abstract extraction interface with heuristic-first hybrid fallback
+- [x] Azure OpenAI integration for complex layouts
+- [x] Externalized system and extraction prompts
 - [ ] Anthropic Claude as alternative provider
-- [ ] LLM confidence scores + token tracking
-- [ ] Cost per document metrics
+- [ ] LLM-provided field evidence and calibrated confidence scores + token tracking
+- [ ] Measured cost per document metrics
 
 ### Phase 4: Multi-Document Support
 - [ ] Support SUPPLIER_INVOICE, PURCHASE_ORDER, SHIPPING_LABEL, etc.

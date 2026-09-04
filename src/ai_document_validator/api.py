@@ -14,7 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ai_document_validator.common.logging_config import setup_logger
 from ai_document_validator.config.config_types import ExtractionResult, Verdict
 from ai_document_validator.config.validation import RuleConfigModel
-from ai_document_validator.process.extraction.extractors import PDFExtractor, TextExtractor, UnsupportedDocumentError
+from ai_document_validator.process.extraction.extractors import LLMExtractor, PDFExtractor, UnsupportedDocumentError
+from ai_document_validator.process.extraction.hybrid import HybridExtractionResult, HybridExtractor
 from ai_document_validator.process.extraction.selector import select_extractor
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
@@ -84,6 +85,8 @@ class ExtractionResponse(BaseModel):
     page_hint: int | None
     model_id: str | None
     latency_ms: float | None
+    llm_fallback_required: bool
+    llm_fallback_reasons: list[str]
 
 
 class ValidationResponse(ExtractionResponse):
@@ -112,7 +115,7 @@ def _decode_request_content(request: ValidateRequest) -> str | bytes:
     return base64.b64decode(request.content_base64)
 
 
-def _extract(request: ValidateRequest) -> ExtractionResult:
+def _extract(request: ValidateRequest) -> HybridExtractionResult:
     """Select an extractor and extract the request document."""
     content = _decode_request_content(request)
     extractor = select_extractor(request.source_name, request.content_type)
@@ -120,13 +123,23 @@ def _extract(request: ValidateRequest) -> ExtractionResult:
     if isinstance(extractor, PDFExtractor):
         if not isinstance(content, bytes):
             raise ValueError("PDF documents must use content_base64")
-        return extractor.extract(content, metadata)
-    if not isinstance(content, str):
+    elif not isinstance(content, str):
         raise ValueError("Text documents must use content")
-    return TextExtractor().extract(content, metadata)
+
+    hybrid_extractor = HybridExtractor(
+        heuristic_extractor=extractor,
+        required_fields=request.config.required_fields or [],
+        confidence_threshold=request.config.review_confidence_threshold or 0.0,
+        fallback_extractor=LLMExtractor(),
+    )
+    return hybrid_extractor.extract(content, metadata)
 
 
-def _extraction_response(extraction: ExtractionResult) -> ExtractionResponse:
+def _extraction_response(
+    extraction: ExtractionResult,
+    llm_fallback_required: bool = False,
+    llm_fallback_reasons: list[str] | None = None,
+) -> ExtractionResponse:
     """Map the internal extraction result to an API response."""
     return ExtractionResponse(
         fields=ExtractedFieldsResponse(**extraction.fields._asdict()),
@@ -135,12 +148,19 @@ def _extraction_response(extraction: ExtractionResult) -> ExtractionResponse:
         page_hint=extraction.page_hint,
         model_id=extraction.model_id,
         latency_ms=extraction.latency_ms,
+        llm_fallback_required=llm_fallback_required,
+        llm_fallback_reasons=llm_fallback_reasons or [],
     )
 
 
-def _validation_response(verdict: Verdict, extraction: ExtractionResult) -> ValidationResponse:
+def _validation_response(
+    verdict: Verdict,
+    extraction: ExtractionResult,
+    llm_fallback_required: bool,
+    llm_fallback_reasons: list[str],
+) -> ValidationResponse:
     """Map the internal verdict to an API response."""
-    response = _extraction_response(extraction)
+    response = _extraction_response(extraction, llm_fallback_required, llm_fallback_reasons)
     return ValidationResponse(
         **response.model_dump(),
         status=verdict.status,
@@ -160,7 +180,12 @@ def extract_document(request: ValidateRequest) -> ExtractionResponse | Unsupport
     """Extract invoice fields from text or a base64-encoded PDF."""
     started_at = time.perf_counter()
     try:
-        response = _extraction_response(_extract(request))
+        hybrid_result = _extract(request)
+        response = _extraction_response(
+            hybrid_result.extraction,
+            hybrid_result.fallback_required,
+            hybrid_result.fallback_reasons,
+        )
         logger.info("Document extraction request completed: source_type=%s", request.source_name)
         return response
     except UnsupportedDocumentError as exc:
@@ -178,10 +203,16 @@ def validate_document(request: ValidateRequest) -> ValidationResponse | Unsuppor
     """Extract and validate an invoice document against its rule config."""
     started_at = time.perf_counter()
     try:
-        extraction = _extract(request)
+        hybrid_result = _extract(request)
+        extraction = hybrid_result.extraction
         verdict = RulesEvaluator().evaluate(extraction, request.config.to_rule_config())
         logger.info("Document validation request completed: status=%s", verdict.status)
-        return _validation_response(verdict, extraction)
+        return _validation_response(
+            verdict,
+            extraction,
+            hybrid_result.fallback_required,
+            hybrid_result.fallback_reasons,
+        )
     except UnsupportedDocumentError as exc:
         logger.warning("Document validation unsupported: source_type=%s", request.source_name)
         return UnsupportedDocumentResponse(detail=str(exc))
