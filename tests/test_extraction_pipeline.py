@@ -6,7 +6,7 @@ import pytest
 
 from ai_document_validator.common.constants import VerdictStatusValues
 from ai_document_validator.config.config_types import RuleConfig
-from ai_document_validator.process.extraction.extractors import PDFExtractor, TextExtractor
+from ai_document_validator.process.extraction.extractors import PDFExtractor, TextExtractor, UnsupportedDocumentError
 from ai_document_validator.process.extraction.selector import extract_document_file, select_extractor
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
@@ -125,6 +125,13 @@ class TestMultiFormatExtraction:
         """Reject empty PDF bytes with a safe domain-level error."""
         with pytest.raises(ValueError, match="Failed to extract PDF"):
             PDFExtractor().extract(b"")
+
+    def test_textless_pdf_returns_unsupported_document(self) -> None:
+        """Identify scanned PDFs separately from corrupt PDF input."""
+        scanned_pdf = self.samples_dir / "inv_012_scanned_no_text.pdf"
+
+        with pytest.raises(UnsupportedDocumentError, match="no extractable text"):
+            PDFExtractor().extract(scanned_pdf.read_bytes())
 
     def test_missing_fields_remain_explicit(self) -> None:
         """Allow missing fields to flow to the rules engine as failures."""

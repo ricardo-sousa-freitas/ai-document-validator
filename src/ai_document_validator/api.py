@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ai_document_validator.common.logging_config import setup_logger
 from ai_document_validator.config.config_types import ExtractionResult, Verdict
 from ai_document_validator.config.validation import RuleConfigModel
-from ai_document_validator.process.extraction.extractors import PDFExtractor, TextExtractor
+from ai_document_validator.process.extraction.extractors import PDFExtractor, TextExtractor, UnsupportedDocumentError
 from ai_document_validator.process.extraction.selector import select_extractor
 from ai_document_validator.process.rules.evaluator import RulesEvaluator
 
@@ -94,6 +94,13 @@ class ValidationResponse(ExtractionResponse):
     total_tokens: int | None
 
 
+class UnsupportedDocumentResponse(BaseModel):
+    """Response for a document the configured extractor cannot process."""
+
+    status: str = "UNSUPPORTED_DOCUMENT"
+    detail: str
+
+
 app = FastAPI(title="AI Document Validator", version="0.1.0")
 
 
@@ -148,14 +155,17 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/v1/extract", response_model=ExtractionResponse)
-def extract_document(request: ValidateRequest) -> ExtractionResponse:
+@app.post("/v1/extract", response_model=ExtractionResponse | UnsupportedDocumentResponse)
+def extract_document(request: ValidateRequest) -> ExtractionResponse | UnsupportedDocumentResponse:
     """Extract invoice fields from text or a base64-encoded PDF."""
     started_at = time.perf_counter()
     try:
         response = _extraction_response(_extract(request))
         logger.info("Document extraction request completed: source_type=%s", request.source_name)
         return response
+    except UnsupportedDocumentError as exc:
+        logger.warning("Document extraction unsupported: source_type=%s", request.source_name)
+        return UnsupportedDocumentResponse(detail=str(exc))
     except (OSError, TypeError, ValueError) as exc:
         logger.exception("Document extraction request failed: error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -163,8 +173,8 @@ def extract_document(request: ValidateRequest) -> ExtractionResponse:
         logger.info("Document extraction request latency_ms=%.2f", (time.perf_counter() - started_at) * 1000)
 
 
-@app.post("/v1/validate", response_model=ValidationResponse)
-def validate_document(request: ValidateRequest) -> ValidationResponse:
+@app.post("/v1/validate", response_model=ValidationResponse | UnsupportedDocumentResponse)
+def validate_document(request: ValidateRequest) -> ValidationResponse | UnsupportedDocumentResponse:
     """Extract and validate an invoice document against its rule config."""
     started_at = time.perf_counter()
     try:
@@ -172,6 +182,9 @@ def validate_document(request: ValidateRequest) -> ValidationResponse:
         verdict = RulesEvaluator().evaluate(extraction, request.config.to_rule_config())
         logger.info("Document validation request completed: status=%s", verdict.status)
         return _validation_response(verdict, extraction)
+    except UnsupportedDocumentError as exc:
+        logger.warning("Document validation unsupported: source_type=%s", request.source_name)
+        return UnsupportedDocumentResponse(detail=str(exc))
     except (OSError, TypeError, ValueError) as exc:
         logger.exception("Document validation request failed: error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

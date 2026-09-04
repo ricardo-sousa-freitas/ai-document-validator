@@ -338,6 +338,7 @@ evaluator.add_rule(InvoiceNumberFormatRule)
 
 The API accepts JSON requests. Plain text is sent in `content`; PDF bytes are sent as base64 in
 `content_base64`. `source_name` determines the format unless an explicit `content_type` is supplied.
+PDFs with no extractable text layer return `UNSUPPORTED_DOCUMENT`; corrupted PDFs return a safe `400` error.
 
 ```bash
 # Start server
@@ -356,6 +357,17 @@ curl -X POST http://localhost:8000/v1/extract \
 # GET /health
 curl http://localhost:8000/health
 ```
+
+## Streamlit Interface
+
+Run the local document-validation interface:
+
+```bash
+uv run streamlit run src/ai_document_validator/ui/streamlit_app.py
+```
+
+Upload a `.txt` or `.pdf` invoice, set the date and currency rules, and inspect the extracted fields,
+confidence values, evidence preview, and rule verdicts.
 
 **Response** (example):
 

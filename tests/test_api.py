@@ -92,3 +92,17 @@ class TestApi:
         assert response.status_code == 400
         assert response.json()["detail"] == "Failed to extract PDF document"
         assert "not a PDF" not in response.text
+
+    def test_returns_unsupported_status_for_scanned_pdf(self) -> None:
+        """Return a structured outcome for a PDF with no text layer."""
+        pdf_bytes = (self.samples_dir / "inv_012_scanned_no_text.pdf").read_bytes()
+        payload = {
+            "source_name": "inv_012_scanned_no_text.pdf",
+            "content_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+            "config": {"document_type": "SUPPLIER_INVOICE"},
+        }
+
+        response = self.client.post("/v1/validate", json=payload)
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "UNSUPPORTED_DOCUMENT"

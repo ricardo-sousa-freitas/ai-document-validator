@@ -26,6 +26,10 @@ from ai_document_validator.config.config_types import (
 logger = setup_logger(__name__)
 
 
+class UnsupportedDocumentError(ValueError):
+    """Raised when a document is valid but unsupported by the extraction path."""
+
+
 class FieldEvidence(NamedTuple):
     """Evidence metadata for one regex-extracted field."""
 
@@ -331,11 +335,14 @@ class PDFExtractor(Extractor):
                 text = self._extract_text_from_pdf(pdf_reader)
 
             if not text.strip():
-                raise ValueError("PDF contains no extractable text")
+                raise UnsupportedDocumentError("PDF contains no extractable text")
 
             result = self.text_extractor.extract(text, metadata)
             logger.info("Completed PDF extraction: pages=%d", len(pdf_reader.pages))
             return result
+        except UnsupportedDocumentError:
+            logger.warning("PDF extraction unsupported: no text layer")
+            raise
         except (OSError, PdfReadError, ValueError) as exc:
             logger.exception(
                 "PDF extraction failed",
