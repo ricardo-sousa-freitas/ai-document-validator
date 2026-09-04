@@ -1,0 +1,19 @@
+KRANTZ PRAZISIONSTEILE GMBH & CO. KG
+Industriering 7, 42897 Remscheid
+USt-IdNr.: DE145879632
+
+RECHNUNG / INVOICE            No. KP-2026-10042
+                              Date: 2026-08-11
+
+Pos  Article            Qty   Unit price      Line total
+001  Shaft DIN 6885      120        14.20        1,704.00
+002  Bushing 25x32        80         7.95          636.00
+003  Retaining ring      500         0.42          210.00
+
+                              Subtotal:          2,550.00
+                              Discount 3%:         -76.50
+                              Net total:         2,473.50
+                              VAT 19%:             469.97
+                              Total Amount:      2,943.47 EUR
+
+Delivery note 88213 enclosed.

@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+.github/
+technical-challenge/
+.vscode/
+AI_USAGE.md
+code_quality_notebook.ipynb
+scripts/
