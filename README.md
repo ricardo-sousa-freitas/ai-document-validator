@@ -93,41 +93,48 @@ uv run vulture src/ --min-confidence 100
 ```
 src/ai_document_validator/
 ├── __init__.py                 # Package entry point
+├── api.py                      # FastAPI application and endpoints
 ├── main.py                     # CLI entry point
 │
-├── common/                     # Shared utilities
-│   ├── logging_config.py      # Centralized logger setup
-│   ├── constants.py           # Field names, statuses, confidence thresholds
-│   └── __init__.py
-│
-├── config/                     # Configuration & type definitions
-│   ├── config_types.py        # NamedTuple types (InvoiceFields, Verdict, etc.)
-│   └── __init__.py
-│
 ├── clients/                    # External service clients
-│   ├── extractors.py          # Extractor implementations (Text, Fixture, PDF)
+│   ├── azure_llm_client.py     # Optional Azure OpenAI client
+│   └── __init__.py
+│
+├── common/                     # Shared utilities
+│   ├── constants.py            # Field names, statuses, confidence thresholds
+│   ├── logging_config.py       # Centralized logger setup
+│   └── __init__.py
+│
+├── config/                     # Configuration, prompts, and type definitions
+│   ├── config_loader_prompts.py # LLM prompt loader
+│   ├── config_types.py         # Typed domain/config structures
+│   ├── prompts.yaml            # System and extraction prompts
+│   ├── rule_validation_config.yaml # Golden-set rule configuration
+│   ├── validation.py            # External config validation
 │   └── __init__.py
 │
 ├── process/                    # Core domain logic
 │   ├── extraction/
+│   │   ├── extractors.py       # Text, PDF, and LLM extractors
+│   │   ├── hybrid.py           # Heuristic-first fallback orchestration
+│   │   ├── selector.py         # Extractor selection by type or extension
 │   │   └── __init__.py
 │   ├── rules/
-│   │   ├── evaluator.py       # Rule base class, concrete rules, RulesEvaluator
+│   │   ├── evaluator.py        # Rule base class and RulesEvaluator
 │   │   └── __init__.py
 │   └── __init__.py
 │
-├── eval/                       # Evaluation harness
-│   ├── __main__.py            # Module entry point (python -m)
-│   ├── cli.py                 # CLI runner
-│   ├── golden_set.py          # Golden set loader & metrics
+├── eval/                      # Golden-set evaluation harness
+│   ├── __main__.py             # Module entry point (python -m)
+│   ├── cli.py                  # CLI runner
+│   ├── golden_set.py           # Case loader and metrics
 │   └── __init__.py
 │
-├── api.py                      # FastAPI endpoints
-│
-├── ui/                         # Streamlit user interface (future)
+├── ui/                       # User interfaces
+│   ├── streamlit_app.py        # Streamlit validation interface
 │   └── __init__.py
 │
-└── workflow/                   # Orchestration (future multi-step flows)
+└── workflow/                  # Reserved for future orchestration
     └── __init__.py
 
 fixtures/
