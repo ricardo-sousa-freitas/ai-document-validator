@@ -464,37 +464,31 @@ fields, confidence values, evidence preview, and rule verdicts. Stop either serv
 
 ## What's Next (With More Time)
 
-### Phase 2: HTTP API
-- [x] FastAPI endpoints for `/v1/validate`, `/v1/extract`, `/health`
-- [x] Base64 JSON document input and strict Pydantic config validation
-- [x] OpenAPI schema generated from the request/response models
-- [ ] Structured JSON logging with request ID and verdict
+### Production Observability
 
-### Phase 3: LLM Integration
-- [x] Abstract extraction interface with heuristic-first hybrid fallback
-- [x] Azure OpenAI integration for complex layouts
-- [x] Externalized system and extraction prompts
-- [ ] Anthropic Claude as alternative provider
-- [ ] LLM-provided field evidence and calibrated confidence scores + token tracking
-- [ ] Measured cost per document metrics
+- Structured JSON logging with request ID, document type, model, verdict, and latency.
+- Prometheus or OpenTelemetry metrics for verdicts, extraction latency, fallback rate,
+  token usage, and cost.
+- Drift monitoring for field accuracy, confidence calibration, verdict distribution,
+  and rule failure rates.
+- A review dashboard for sampled documents, evidence, and human overrides.
 
-### Phase 4: Multi-Document Support
-- [ ] Support SUPPLIER_INVOICE, PURCHASE_ORDER, SHIPPING_LABEL, etc.
-- [ ] Dynamic field schemas per document type
-- [ ] Document-type-aware confidence thresholds
+### Confidence and LLM Quality
 
-### Phase 5: Production Hardening
-- [ ] PDF OCR (Azure Form Recognizer, AWS Textract)
-- [ ] Async document processing with task queues
-- [ ] Result caching + duplicate detection
-- [ ] Audit trail (who reviewed, when, why overridden)
-- [ ] Model versioning + A/B testing
+- Request field-level evidence and confidence from the LLM response.
+- Calibrate confidence scores against a larger human-reviewed dataset before changing
+  review thresholds.
+- Track token usage and measured cost per document by deployment and document type.
+- Add an opt-in live Azure evaluation mode alongside the deterministic offline harness.
+- Add alternative providers only if they offer a measurable quality, cost, or latency
+  advantage.
 
-### Phase 6: Observability
-- [ ] Prometheus metrics (verdict rate, latency, cost)
-- [ ] Structured logging (OpenTelemetry traces)
-- [ ] Drift monitoring (alert on quality degradation)
-- [ ] Debug dashboard (sample verdicts, failure analysis)
+### Document and Workflow Expansion
+
+- Add OCR for scanned PDFs through a dedicated OCR provider.
+- Support additional document types with separate schemas and validation rules.
+- Add asynchronous processing, caching, duplicate detection, audit history, and model
+  versioning when workload and compliance requirements justify them.
 
 ---
 
